@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
 import { toast } from "sonner";
+import pLimit from "p-limit";
 import type { Row } from "@/types";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
@@ -211,6 +212,7 @@ export default function AICoderPage() {
   const [showAnalytics, setShowAnalytics] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
+  const [batchConcurrency, setBatchConcurrency] = useState(3);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [codesInput, setCodesInput] = useState("Positive\nNegative\nNeutral\nDetailed\nBrief");
   const batchAbortRef = useRef(false);
@@ -379,12 +381,16 @@ Only use codes from the list. Confidence 0.0–1.0.`,
     setBatchProgress(0);
     batchAbortRef.current = false;
     let processed = 0;
-    for (let i = 0; i < data.length; i++) {
-      if (batchAbortRef.current) break;
-      await getAiSuggestion(i);
-      processed++;
-      setBatchProgress(processed);
-    }
+    const limit = pLimit(batchConcurrency);
+    const tasks = data.map((_, i) =>
+      limit(async () => {
+        if (batchAbortRef.current) return;
+        await getAiSuggestion(i);
+        processed++;
+        setBatchProgress(processed);
+      })
+    );
+    await Promise.all(tasks);
     setBatchRunning(false);
     toast.success(`AI processed ${processed} rows`);
   };
@@ -870,6 +876,13 @@ Only use codes from the list. Confidence 0.0–1.0.`,
               </div>
             ) : (
               <>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span>Concurrency:</span>
+                  <button className="px-2 py-0.5 border rounded hover:bg-muted transition-colors" onClick={() => setBatchConcurrency((c) => Math.max(1, c - 1))}>−</button>
+                  <span className="px-2 border-x min-w-[1.5rem] text-center">{batchConcurrency}</span>
+                  <button className="px-2 py-0.5 border rounded hover:bg-muted transition-colors" onClick={() => setBatchConcurrency((c) => Math.min(10, c + 1))}>+</button>
+                  <span className="text-[10px]">(parallel AI calls)</span>
+                </div>
                 <div className="flex items-center gap-3">
                   <div className="text-xs text-muted-foreground flex-1">
                     Run AI on all {totalRows} rows. Results are cached in session.

@@ -38,6 +38,8 @@ export const ConsensusRowSchema = z.object({
   userContent: z.string(),
   rowIdx: z.number().int().optional(),
   runId: z.string().optional(),
+  enableQualityScoring: z.boolean().optional(),
+  enableDisagreementAnalysis: z.boolean().optional(),
 });
 
 // /api/comparison-row

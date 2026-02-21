@@ -27,6 +27,7 @@ import {
   ChevronRight,
   ChevronDown,
   HelpCircle,
+  ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { Row } from "@/types";
@@ -129,6 +130,9 @@ export default function ProcessDocumentsPage() {
   // Processing
   const [isProcessing, setIsProcessing] = useState(false);
   const [allResults, setAllResults] = useState<Row[]>([]);
+  const [runId, setRunId] = useState<string | null>(null);
+
+  type RunMode = "preview" | "test" | "full";
 
   const currentTemplate = TEMPLATES[templateKey] || TEMPLATES.custom;
   const parsedColumns = outputColumns
@@ -188,22 +192,44 @@ export default function ProcessDocumentsPage() {
   // ─── Process files ────────────────────────────────────────────────────────
   const canProcess = files.length > 0 || folderPath.trim().length > 0;
 
-  const processAll = async () => {
+  const processFiles = async (mode: RunMode) => {
     if (files.length === 0) return toast.error("No files uploaded");
     if (!activeModel) return toast.error("No model configured. Add an API key in Settings.");
+
+    const targetFiles = mode === "full" ? files : files.slice(0, 1);
 
     const systemPrompt = processingInstructions.trim() ||
       `Extract data from this document into structured rows.
 ${parsedColumns.length > 0 ? `Output columns: ${parsedColumns.join(", ")}.` : ""}
 Return ONLY a JSON array where each element has consistent field names. No explanations.`;
 
+    setRunId(null);
     setIsProcessing(true);
     const accumulated: Row[] = [];
 
-    for (let i = 0; i < files.length; i++) {
+    let localRunId: string | null = null;
+    try {
+      const runRes = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runType: "process-documents",
+          provider: activeModel.providerId,
+          model: activeModel.defaultModel,
+          temperature: 0,
+          systemPrompt,
+          inputFile: files.map((f) => f.name).join(", ") || "unnamed",
+          inputRows: targetFiles.length,
+        }),
+      });
+      const rd = await runRes.json();
+      localRunId = rd.id ?? null;
+    } catch { /* non-fatal */ }
+
+    for (let i = 0; i < targetFiles.length; i++) {
       setFiles((prev) => prev.map((f, idx) => idx === i ? { ...f, status: "processing" } : f));
 
-      const entry = files[i];
+      const entry = targetFiles[i];
       try {
         const buffer = await entry.file.arrayBuffer();
         const base64 = btoa(
@@ -246,9 +272,10 @@ Return ONLY a JSON array where each element has consistent field names. No expla
     }
 
     setAllResults(accumulated);
+    setRunId(localRunId);
     setIsProcessing(false);
     if (accumulated.length > 0) {
-      toast.success(`Extracted ${accumulated.length} records from ${files.length} file(s)`);
+      toast.success(`Extracted ${accumulated.length} records from ${targetFiles.length} file(s)`);
     }
   };
 
@@ -528,17 +555,22 @@ Return ONLY a JSON array where each element has consistent field names. No expla
       {/* ── 3. Execute ───────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">3. Execute</h2>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-3 gap-3">
+          <Button
+            variant="outline"
+            size="lg"
+            className="h-12 text-sm border-dashed"
+            disabled={!canProcess || isProcessing || !activeModel}
+            onClick={() => processFiles("preview")}
+          >
+            {isProcessing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            Preview (1 doc)
+          </Button>
           <Button
             size="lg"
             className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
             disabled={!canProcess || isProcessing || !activeModel}
-            onClick={() => {
-              // Test: process first file only
-              const saved = files.slice(1);
-              setFiles((prev) => prev.slice(0, 1));
-              processAll().finally(() => setFiles((prev) => [...prev, ...saved]));
-            }}
+            onClick={() => processFiles("test")}
           >
             {isProcessing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Test (1 file)
@@ -548,7 +580,7 @@ Return ONLY a JSON array where each element has consistent field names. No expla
             size="lg"
             className="h-12 text-base"
             disabled={!canProcess || isProcessing || !activeModel}
-            onClick={processAll}
+            onClick={() => processFiles("full")}
           >
             {isProcessing ? (
               <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Processing…</>
@@ -569,9 +601,17 @@ Return ONLY a JSON array where each element has consistent field names. No expla
                 {allResults.length} records from {files.filter((f) => f.status === "done").length} file(s)
               </p>
             </div>
-            <Button variant="outline" size="sm" onClick={exportCsv}>
-              <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
-            </Button>
+            <div className="flex items-center gap-3">
+              {runId && (
+                <Link href={`/history/${runId}`} className="flex items-center gap-1.5 text-xs text-indigo-500 hover:underline">
+                  <ExternalLink className="h-3 w-3" />
+                  View in History
+                </Link>
+              )}
+              <Button variant="outline" size="sm" onClick={exportCsv}>
+                <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
+              </Button>
+            </div>
           </div>
           <div className="border rounded-lg overflow-hidden">
             <DataTable data={allResults} />

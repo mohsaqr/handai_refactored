@@ -19,6 +19,7 @@ import {
   CheckCircle2,
   Settings2,
   AlertCircle,
+  ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
 import pLimit from "p-limit";
@@ -39,6 +40,7 @@ interface Step {
 }
 
 type Row = Record<string, unknown>;
+type RunMode = "preview" | "test" | "full";
 
 function makeStep(idx: number): Step {
   return {
@@ -56,9 +58,10 @@ export default function AutomatorPage() {
   const [availableCols, setAvailableCols] = useState<string[]>([]);
   const [steps, setSteps] = useState<Step[]>([makeStep(1)]);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isTestRun, setIsTestRun] = useState(false);
+  const [runMode, setRunMode] = useState<RunMode>("full");
   const [progress, setProgress] = useState({ completed: 0, total: 0 });
   const [results, setResults] = useState<Row[]>([]);
+  const [runId, setRunId] = useState<string | null>(null);
 
   const provider = useActiveModel();
 
@@ -134,20 +137,25 @@ export default function AutomatorPage() {
     a.click();
   };
 
-  const runAutomator = async (testMode: boolean) => {
+  const runAutomator = async (mode: RunMode) => {
     if (data.length === 0) return toast.error("No data loaded");
     if (!provider) return toast.error("No model configured. Add an API key in Settings.");
     if (steps.some((s) => !s.task.trim())) return toast.error("All steps need a task description");
 
-    const targetData = testMode ? data.slice(0, 10) : data;
+    const targetData =
+      mode === "preview" ? data.slice(0, 3) :
+      mode === "test"    ? data.slice(0, 10) :
+      data;
+
+    setRunId(null);
     setIsProcessing(true);
-    setIsTestRun(testMode);
+    setRunMode(mode);
     setProgress({ completed: 0, total: targetData.length });
 
     const limit = pLimit(2);
     const newResults: Row[] = [];
 
-    let runId: string | null = null;
+    let localRunId: string | null = null;
     try {
       const runRes = await fetch("/api/runs", {
         method: "POST",
@@ -163,7 +171,7 @@ export default function AutomatorPage() {
         }),
       });
       const rd = await runRes.json();
-      runId = rd.id ?? null;
+      localRunId = rd.id ?? null;
     } catch { /* non-fatal */ }
 
     const tasks = targetData.map((row, idx) =>
@@ -198,13 +206,13 @@ export default function AutomatorPage() {
     await Promise.all(tasks);
     setResults(newResults);
 
-    if (runId) {
+    if (localRunId) {
       try {
         await fetch("/api/results", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            runId,
+            runId: localRunId,
             results: newResults.map((r, i) => ({
               rowIndex: i,
               input: r,
@@ -218,8 +226,9 @@ export default function AutomatorPage() {
       } catch { /* non-fatal */ }
     }
 
+    setRunId(localRunId);
     setIsProcessing(false);
-    toast.success(testMode ? `Test complete (${targetData.length} rows)` : "Automator run complete!");
+    toast.success(mode === "full" ? "Automator run complete!" : `${mode === "preview" ? "Preview" : "Test"} complete (${targetData.length} rows)`);
   };
 
   const progressPct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
@@ -408,7 +417,7 @@ export default function AutomatorPage() {
             <div className="flex justify-between text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {isTestRun ? "Test run" : "Full run"} — running {steps.length}-step pipeline on {progress.total} rows…
+                {runMode !== "full" ? (runMode === "preview" ? "Preview" : "Test") + " run" : "Full run"} — running {steps.length}-step pipeline on {progress.total} rows…
               </span>
               <span>{progress.completed} / {progress.total}</span>
             </div>
@@ -427,17 +436,23 @@ export default function AutomatorPage() {
           </Link>
         )}
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-3 gap-3">
+          <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
+            disabled={data.length === 0 || isProcessing || !provider}
+            onClick={() => runAutomator("preview")}>
+            {isProcessing && runMode === "preview" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            Preview (3 rows)
+          </Button>
           <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
             disabled={data.length === 0 || isProcessing || !provider}
-            onClick={() => runAutomator(true)}>
-            {isProcessing && isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => runAutomator("test")}>
+            {isProcessing && runMode === "test" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Test (10 rows)
           </Button>
           <Button variant="outline" size="lg" className="h-12 text-base"
             disabled={data.length === 0 || isProcessing || !provider}
-            onClick={() => runAutomator(false)}>
-            {isProcessing && !isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => runAutomator("full")}>
+            {isProcessing && runMode === "full" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Full Run ({data.length} rows)
           </Button>
         </div>
@@ -451,9 +466,17 @@ export default function AutomatorPage() {
               <h2 className="text-lg font-semibold">Results</h2>
               <p className="text-xs text-muted-foreground mt-0.5">{results.length} rows · {steps.length}-step pipeline</p>
             </div>
-            <Button variant="outline" size="sm" onClick={handleExport}>
-              <Download className="h-4 w-4 mr-2" /> Export CSV
-            </Button>
+            <div className="flex items-center gap-3">
+              {runId && (
+                <Link href={`/history/${runId}`} className="flex items-center gap-1.5 text-xs text-indigo-500 hover:underline">
+                  <ExternalLink className="h-3 w-3" />
+                  View in History
+                </Link>
+              )}
+              <Button variant="outline" size="sm" onClick={handleExport}>
+                <Download className="h-4 w-4 mr-2" /> Export CSV
+              </Button>
+            </div>
           </div>
           <div className="border rounded-lg overflow-hidden">
             <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">

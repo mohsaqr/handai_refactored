@@ -8,12 +8,13 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useAppStore } from "@/lib/store";
-import { Download, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Download, Loader2, CheckCircle2, AlertCircle, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
 
 type Row = Record<string, unknown>;
+type RunMode = "preview" | "test" | "full";
 
 function providerLabel(id: string) {
   if (id === "lmstudio") return "LM Studio";
@@ -30,9 +31,11 @@ export default function ModelComparisonPage() {
   );
   const [selectedProviders, setSelectedProviders] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isTestRun, setIsTestRun] = useState(false);
+  const [runMode, setRunMode] = useState<RunMode>("full");
   const [progress, setProgress] = useState({ completed: 0, total: 0 });
   const [results, setResults] = useState<Row[]>([]);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [concurrency, setConcurrency] = useState(3);
 
   const providers = useAppStore((state) => state.providers);
   const allProviders = Object.values(providers);
@@ -60,7 +63,7 @@ export default function ModelComparisonPage() {
   const toggleAllCols = () =>
     setSelectedCols(selectedCols.length === allColumns.length ? [] : [...allColumns]);
 
-  const startComparison = async (testMode: boolean) => {
+  const startComparison = async (mode: RunMode) => {
     if (data.length === 0) return toast.error("No data loaded");
     if (selectedProviders.length < 2) return toast.error("Select at least 2 models to compare");
     if (!systemPrompt.trim()) return toast.error("Enter AI instructions first");
@@ -71,12 +74,38 @@ export default function ModelComparisonPage() {
 
     if (activeModels.length < 2) return toast.error("Some selected providers have missing API keys");
 
-    const targetData = testMode ? data.slice(0, 10) : data;
+    const targetData =
+      mode === "preview" ? data.slice(0, 3) :
+      mode === "test"    ? data.slice(0, 10) :
+      data;
+
+    setRunId(null);
     setIsProcessing(true);
-    setIsTestRun(testMode);
+    setRunMode(mode);
     setProgress({ completed: 0, total: targetData.length });
-    const limit = pLimit(3);
+
+    const limit = pLimit(concurrency);
     const newResults: Row[] = [...targetData];
+
+    let localRunId: string | null = null;
+    try {
+      const firstProvider = providers[selectedProviders[0]];
+      const runRes = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runType: "model-comparison",
+          provider: selectedProviders.join(","),
+          model: firstProvider?.defaultModel ?? "unknown",
+          temperature: 0,
+          systemPrompt,
+          inputFile: dataName || "unnamed",
+          inputRows: targetData.length,
+        }),
+      });
+      const rd = await runRes.json();
+      localRunId = rd.id ?? null;
+    } catch { /* non-fatal */ }
 
     const tasks = targetData.map((row, idx) =>
       limit(async () => {
@@ -100,6 +129,7 @@ export default function ModelComparisonPage() {
 
     await Promise.all(tasks);
     setResults(newResults);
+    setRunId(localRunId);
     setIsProcessing(false);
     toast.success("Comparison complete!");
   };
@@ -274,17 +304,31 @@ export default function ModelComparisonPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>Concurrency:</span>
+          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.max(1, c - 1))}>−</button>
+          <span className="px-3 border-x min-w-[2rem] text-center">{concurrency}</span>
+          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.min(10, c + 1))}>+</button>
+          <span className="text-xs">(parallel API calls)</span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3">
+          <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
+            disabled={data.length === 0 || isProcessing || selectedProviders.length < 2 || !systemPrompt.trim() || selectedCols.length === 0}
+            onClick={() => startComparison("preview")}>
+            {isProcessing && runMode === "preview" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            Preview (3 rows)
+          </Button>
           <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
             disabled={data.length === 0 || isProcessing || selectedProviders.length < 2 || !systemPrompt.trim() || selectedCols.length === 0}
-            onClick={() => startComparison(true)}>
-            {isProcessing && isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => startComparison("test")}>
+            {isProcessing && runMode === "test" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Test (10 rows)
           </Button>
           <Button variant="outline" size="lg" className="h-12 text-base"
             disabled={data.length === 0 || isProcessing || selectedProviders.length < 2 || !systemPrompt.trim() || selectedCols.length === 0}
-            onClick={() => startComparison(false)}>
-            {isProcessing && !isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => startComparison("full")}>
+            {isProcessing && runMode === "full" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Full Run ({data.length} rows)
           </Button>
         </div>
@@ -298,9 +342,17 @@ export default function ModelComparisonPage() {
               <h2 className="text-lg font-semibold">Results</h2>
               <p className="text-xs text-muted-foreground mt-0.5">{results.length} rows × {selectedProviders.length} models</p>
             </div>
-            <Button variant="outline" size="sm" onClick={handleExport}>
-              <Download className="h-4 w-4 mr-2" /> Export CSV
-            </Button>
+            <div className="flex items-center gap-3">
+              {runId && (
+                <Link href={`/history/${runId}`} className="flex items-center gap-1.5 text-xs text-indigo-500 hover:underline">
+                  <ExternalLink className="h-3 w-3" />
+                  View in History
+                </Link>
+              )}
+              <Button variant="outline" size="sm" onClick={handleExport}>
+                <Download className="h-4 w-4 mr-2" /> Export CSV
+              </Button>
+            </div>
           </div>
           <div className="border rounded-lg overflow-hidden">
             <DataTable data={results} />

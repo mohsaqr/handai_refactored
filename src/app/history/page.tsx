@@ -17,11 +17,19 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import Link from "next/link";
 import type { RunMeta } from "@/types";
 
 const PAGE_SIZE = 20;
+
+function formatDuration(start: string, end: string): string {
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  return ms < 60000
+    ? `${Math.round(ms / 1000)}s`
+    : `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+}
 
 export default function HistoryPage() {
   const [runs, setRuns] = useState<RunMeta[]>([]);
@@ -29,6 +37,8 @@ export default function HistoryPage() {
   const [page, setPage] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [providerFilter, setProviderFilter] = useState("all");
 
   const fetchRuns = async (pageNum = 0) => {
     setIsRefreshing(true);
@@ -55,11 +65,15 @@ export default function HistoryPage() {
     fetchRuns(0);
   }, []);
 
+  const uniqueProviders = [...new Set(runs.map((r) => r.provider).filter(Boolean))].sort();
+
   const filteredRuns = runs.filter(
     (run) =>
-      run.inputFile?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      run.runType?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      run.model?.toLowerCase().includes(searchTerm.toLowerCase())
+      (run.inputFile?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        run.runType?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        run.model?.toLowerCase().includes(searchTerm.toLowerCase())) &&
+      (statusFilter === "all" || run.status === statusFilter) &&
+      (providerFilter === "all" || run.provider === providerFilter)
   );
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
@@ -91,15 +105,39 @@ export default function HistoryPage() {
         </Button>
       </div>
 
-      {/* Search */}
-      <div className="pb-6 relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-        <Input
-          placeholder="Search by file, model, or type..."
-          className="pl-10"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-        />
+      {/* Search + Filters */}
+      <div className="pb-6 flex items-center gap-3">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search by file, model, or type..."
+            className="pl-10"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+          />
+        </div>
+        <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <SelectTrigger className="w-36 text-xs">
+            <SelectValue placeholder="Status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All statuses</SelectItem>
+            <SelectItem value="completed">Completed</SelectItem>
+            <SelectItem value="processing">Processing</SelectItem>
+            <SelectItem value="failed">Failed</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={providerFilter} onValueChange={setProviderFilter}>
+          <SelectTrigger className="w-36 text-xs">
+            <SelectValue placeholder="Provider" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All providers</SelectItem>
+            {uniqueProviders.map((p) => (
+              <SelectItem key={p} value={p}>{p}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Runs list */}
@@ -160,6 +198,12 @@ export default function HistoryPage() {
                       minute: "2-digit",
                     })}
                   </div>
+                  {run.completedAt && (
+                    <div className="flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      {formatDuration(run.startedAt, run.completedAt)}
+                    </div>
+                  )}
                   <span className="font-medium text-foreground">
                     {run.successCount} Success / {run.errorCount} Error
                   </span>

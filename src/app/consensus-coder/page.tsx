@@ -12,10 +12,13 @@ import { Input } from "@/components/ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useAppStore } from "@/lib/store";
-import { Download, Loader2, CheckCircle2, ChevronDown, ChevronRight, HelpCircle } from "lucide-react";
+import { Download, Loader2, CheckCircle2, ChevronDown, ChevronRight, HelpCircle, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import pLimit from "p-limit";
+import Link from "next/link";
 import type { Row } from "@/types";
+
+type RunMode = "preview" | "test" | "full";
 
 const DEFAULT_WORKER_PROMPT = `Analyze the provided data and respond with ONLY the requested output values.
 
@@ -58,7 +61,8 @@ export default function ConsensusCoderPage() {
   const [workerPrompt, setWorkerPrompt] = useState(DEFAULT_WORKER_PROMPT);
   const [judgePrompt, setJudgePrompt] = useState(DEFAULT_JUDGE_PROMPT);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isTestRun, setIsTestRun] = useState(false);
+  const [runMode, setRunMode] = useState<RunMode>("full");
+  const [runId, setRunId] = useState<string | null>(null);
   const [progress, setProgress] = useState({ completed: 0, total: 0, success: 0, errors: 0 });
   const [results, setResults] = useState<Row[]>([]);
   const [kappaStats, setKappaStats] = useState<KappaStats | null>(null);
@@ -102,7 +106,7 @@ export default function ConsensusCoderPage() {
   const toggleAllCols = () =>
     setSelectedCols(selectedCols.length === allColumns.length ? [] : [...allColumns]);
 
-  const startProcessing = async (testMode: boolean) => {
+  const startProcessing = async (mode: RunMode) => {
     if (data.length === 0) return toast.error("No data loaded");
     if (selectedCols.length === 0) return toast.error("Select at least one column");
 
@@ -122,12 +126,36 @@ export default function ConsensusCoderPage() {
       return toast.error("API keys missing. Check Settings.");
     }
 
-    const targetData = testMode ? data.slice(0, 10) : data;
+    const targetData =
+      mode === "preview" ? data.slice(0, 3) :
+      mode === "test"    ? data.slice(0, 10) :
+      data;
+
+    setRunId(null);
     setIsProcessing(true);
-    setIsTestRun(testMode);
+    setRunMode(mode);
     setProgress({ completed: 0, total: targetData.length, success: 0, errors: 0 });
     setResults([]);
     setKappaStats(null);
+
+    let localRunId: string | null = null;
+    try {
+      const runRes = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runType: "consensus-coder",
+          provider: judge.providerId,
+          model: judge.model,
+          temperature: 0,
+          systemPrompt: judgePrompt,
+          inputFile: dataName || "unnamed",
+          inputRows: targetData.length,
+        }),
+      });
+      const rd = await runRes.json();
+      localRunId = rd.id ?? null;
+    } catch { /* non-fatal */ }
 
     const limit = pLimit(3);
     const newResults: Row[] = [...targetData];
@@ -156,6 +184,8 @@ export default function ConsensusCoderPage() {
               userContent: JSON.stringify(subset),
               rowIdx: idx,
               includeReasoning: includeJudgeReasoning,
+              enableQualityScoring,
+              enableDisagreementAnalysis,
             }),
           });
 
@@ -172,6 +202,13 @@ export default function ConsensusCoderPage() {
             workerCols[`worker_${i + 1}_output`] = wr?.output ?? "";
           });
 
+          const qualityCols: Record<string, string> = {};
+          if (result.qualityScores) {
+            (result.qualityScores as number[]).forEach((score, i) => {
+              qualityCols[`quality_score_w${i + 1}`] = String(score);
+            });
+          }
+
           newResults[idx] = {
             ...row,
             ...workerCols,
@@ -179,6 +216,8 @@ export default function ConsensusCoderPage() {
             consensus: result.consensusType,
             kappa: result.kappa !== null ? Number(result.kappa).toFixed(3) : "N/A",
             ...(includeJudgeReasoning && result.judgeReasoning ? { judge_reasoning: result.judgeReasoning } : {}),
+            ...qualityCols,
+            ...(result.disagreementReason ? { disagreement_reason: result.disagreementReason } : {}),
           };
 
           setProgress((prev) => ({ ...prev, completed: prev.completed + 1, success: prev.success + 1 }));
@@ -191,11 +230,16 @@ export default function ConsensusCoderPage() {
 
     await Promise.all(tasks);
     setResults(newResults);
+    setRunId(localRunId);
     if (runningKappa !== null) {
       setKappaStats({ kappa: runningKappa, kappaLabel: runningKappaLabel });
     }
     setIsProcessing(false);
-    toast.success(testMode ? "Test run complete!" : "Consensus processing complete!");
+    toast.success(
+      mode === "preview" ? "Preview complete!" :
+      mode === "test" ? "Test run complete!" :
+      "Consensus processing complete!"
+    );
   };
 
   const handleExport = () => {
@@ -432,7 +476,7 @@ export default function ConsensusCoderPage() {
             <div className="flex justify-between text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {isTestRun ? "Test run" : "Full run"} — processing {progress.total} rows…
+                {runMode === "preview" ? "Preview" : runMode === "test" ? "Test run" : "Full run"} — processing {progress.total} rows…
               </span>
               <span>{progress.completed} / {progress.total}</span>
             </div>
@@ -446,17 +490,23 @@ export default function ConsensusCoderPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-3 gap-3">
+          <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
+            disabled={data.length === 0 || isProcessing || selectedCols.length === 0}
+            onClick={() => startProcessing("preview")}>
+            {isProcessing && runMode === "preview" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            Preview (3 rows)
+          </Button>
           <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
             disabled={data.length === 0 || isProcessing || selectedCols.length === 0}
-            onClick={() => startProcessing(true)}>
-            {isProcessing && isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => startProcessing("test")}>
+            {isProcessing && runMode === "test" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Test (10 rows)
           </Button>
           <Button variant="outline" size="lg" className="h-12 text-base"
             disabled={data.length === 0 || isProcessing || selectedCols.length === 0}
-            onClick={() => startProcessing(false)}>
-            {isProcessing && !isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => startProcessing("full")}>
+            {isProcessing && runMode === "full" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Full Run ({data.length} rows)
           </Button>
         </div>
@@ -470,9 +520,17 @@ export default function ConsensusCoderPage() {
               <h2 className="text-lg font-semibold">Results</h2>
               <p className="text-xs text-muted-foreground mt-0.5">{results.length} rows coded</p>
             </div>
-            <Button variant="outline" size="sm" onClick={handleExport}>
-              <Download className="h-4 w-4 mr-2" /> Export CSV
-            </Button>
+            <div className="flex items-center gap-3">
+              {runId && (
+                <Link href={`/history/${runId}`} className="flex items-center gap-1.5 text-xs text-indigo-500 hover:underline">
+                  <ExternalLink className="h-3 w-3" />
+                  View in History
+                </Link>
+              )}
+              <Button variant="outline" size="sm" onClick={handleExport}>
+                <Download className="h-4 w-4 mr-2" /> Export CSV
+              </Button>
+            </div>
           </div>
 
           {kappaStats && (
@@ -490,9 +548,9 @@ export default function ConsensusCoderPage() {
               <div className="flex-1 text-xs text-muted-foreground">
                 Kappa measures inter-rater agreement beyond chance. 0 = chance, 1 = perfect, &lt;0 = less than chance.
               </div>
-              {isTestRun && (
+              {runMode !== "full" && (
                 <span className="text-xs font-medium text-purple-600 border border-purple-200 px-2 py-0.5 rounded bg-purple-50 shrink-0">
-                  Test run · {results.length} of {data.length} rows
+                  {runMode === "preview" ? "Preview" : "Test"} run · {results.length} of {data.length} rows
                 </span>
               )}
             </div>

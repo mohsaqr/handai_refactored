@@ -17,8 +17,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { workers, judge, workerPrompt, judgePrompt, userContent, rowIdx, runId } =
-      parsed.data;
+    const {
+      workers,
+      judge,
+      workerPrompt,
+      judgePrompt,
+      userContent,
+      rowIdx,
+      runId,
+      enableQualityScoring,
+      enableDisagreementAnalysis,
+    } = parsed.data;
 
     // Step 1: Run workers in parallel
     const workerPromises = workers.map(async (w, i) => {
@@ -96,6 +105,50 @@ export async function POST(req: NextRequest) {
 
     const totalLatency = judgeLatency + Math.max(...workerResults.map((r) => r.latency));
 
+    // Step 4 (optional): Quality scoring
+    let qualityScores: number[] | undefined;
+    if (enableQualityScoring) {
+      try {
+        const { text: qsText } = await withRetry(
+          () =>
+            generateText({
+              model: judgeModel,
+              system: `You are a quality assessor. Rate each worker response on a scale of 1-10 for accuracy and completeness. Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is 1-10.`,
+              prompt: `Original Data: ${userContent}\n\nWorker Responses:\n${workersFormatted}`,
+              temperature: 0,
+            }),
+          { maxAttempts: 2, baseDelayMs: 100 }
+        );
+        const clean = qsText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+        const parsed = JSON.parse(clean) as { quality_scores: number[] };
+        if (Array.isArray(parsed.quality_scores)) {
+          qualityScores = parsed.quality_scores;
+        }
+      } catch {
+        // non-fatal — skip quality scores on parse failure
+      }
+    }
+
+    // Step 5 (optional): Disagreement analysis
+    let disagreementReason: string | undefined;
+    if (enableDisagreementAnalysis && consensusType !== "Full Agreement") {
+      try {
+        const { text: drText } = await withRetry(
+          () =>
+            generateText({
+              model: judgeModel,
+              system: `You are an expert analyst. In exactly one sentence, explain why the workers disagreed.`,
+              prompt: `Original Data: ${userContent}\n\nWorker Responses:\n${workersFormatted}`,
+              temperature: 0,
+            }),
+          { maxAttempts: 2, baseDelayMs: 100 }
+        );
+        disagreementReason = drText.trim();
+      } catch {
+        // non-fatal
+      }
+    }
+
     if (runId) {
       await prisma.runResult.create({
         data: {
@@ -117,6 +170,8 @@ export async function POST(req: NextRequest) {
       kappa: isNaN(kappa) ? null : kappa,
       kappaLabel: isNaN(kappa) ? "N/A" : kappa < 0.2 ? "Poor" : kappa < 0.4 ? "Fair" : kappa < 0.6 ? "Moderate" : kappa < 0.8 ? "Substantial" : "Almost Perfect",
       agreementMatrix,
+      ...(qualityScores !== undefined ? { qualityScores } : {}),
+      ...(disagreementReason !== undefined ? { disagreementReason } : {}),
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);

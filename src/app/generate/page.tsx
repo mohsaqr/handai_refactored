@@ -7,9 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
 import { useActiveModel } from "@/lib/hooks";
-import { AlertCircle, Sparkles, Plus, Trash2, Download, Loader2, Minus } from "lucide-react";
+import { AlertCircle, Sparkles, Plus, Trash2, Download, Loader2, Minus, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
 import type { GenerateColumn, Row } from "@/types";
@@ -28,6 +27,7 @@ const COLUMN_TYPES = ["text", "number", "boolean", "list"] as const;
 
 type OutputFormat = "tabular" | "json" | "freetext";
 type Structure = "ai_decide" | "define_columns" | "use_template";
+type RunMode = "preview" | "test" | "full";
 
 const VARIATION_LEVELS = [
   { label: "Low", value: 0.3 },
@@ -51,8 +51,10 @@ export default function GeneratePage() {
   ]);
   const [templateText, setTemplateText] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+  const [runMode, setRunMode] = useState<RunMode>("full");
   const [generatedData, setGeneratedData] = useState<Row[]>([]);
   const [generatedRaw, setGeneratedRaw] = useState("");
+  const [runId, setRunId] = useState<string | null>(null);
 
   const temperature = VARIATION_LEVELS[variationIdx].value;
 
@@ -63,15 +65,36 @@ export default function GeneratePage() {
 
   const canGenerate = description.trim().length > 0 || structure === "define_columns";
 
-  const generate = async (testMode: boolean) => {
+  const generate = async (mode: RunMode) => {
     if (!activeModel) return toast.error("No model configured. Add an API key in Settings.");
     if (!description.trim() && structure !== "define_columns") return toast.error("Describe the data you want to generate first.");
     if (structure === "define_columns" && columns.some((c) => !c.name.trim())) return toast.error("All column names must be filled in.");
 
-    const count = testMode ? 10 : rowCount;
+    const count = mode === "preview" ? 3 : mode === "test" ? 10 : rowCount;
+
+    setRunId(null);
     setIsGenerating(true);
+    setRunMode(mode);
     setGeneratedData([]);
     setGeneratedRaw("");
+
+    let localRunId: string | null = null;
+    try {
+      const runRes = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          runType: "generate",
+          provider: activeModel.providerId,
+          model: activeModel.defaultModel,
+          temperature,
+          inputFile: "synthetic",
+          inputRows: count,
+        }),
+      });
+      const rd = await runRes.json();
+      localRunId = rd.id ?? null;
+    } catch { /* non-fatal */ }
 
     try {
       const res = await fetch("/api/generate-row", {
@@ -98,6 +121,7 @@ export default function GeneratePage() {
       } else {
         setGeneratedRaw(typeof data.raw === "string" ? data.raw : JSON.stringify(data.rows, null, 2));
       }
+      setRunId(localRunId);
       toast.success(`Generated ${data.count ?? count} rows`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -381,14 +405,24 @@ export default function GeneratePage() {
       {/* ── 4. Execute ──────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">4. Execute</h2>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-3 gap-3">
+          <Button
+            variant="outline"
+            size="lg"
+            className="h-12 text-sm border-dashed"
+            disabled={!canGenerate || isGenerating || !activeModel}
+            onClick={() => generate("preview")}
+          >
+            {isGenerating && runMode === "preview" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            Preview (3 rows)
+          </Button>
           <Button
             size="lg"
             className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
             disabled={!canGenerate || isGenerating || !activeModel}
-            onClick={() => generate(true)}
+            onClick={() => generate("test")}
           >
-            {isGenerating ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            {isGenerating && runMode === "test" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Test (10 rows)
           </Button>
           <Button
@@ -396,10 +430,10 @@ export default function GeneratePage() {
             size="lg"
             className="h-12 text-base"
             disabled={!canGenerate || isGenerating || !activeModel}
-            onClick={() => generate(false)}
+            onClick={() => generate("full")}
           >
-            {isGenerating ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Sparkles className="h-4 w-4 mr-2" />}
-            {isGenerating ? `Generating…` : `Generate All (${rowCount} rows)`}
+            {isGenerating && runMode === "full" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Sparkles className="h-4 w-4 mr-2" />}
+            {isGenerating && runMode === "full" ? `Generating…` : `Generate All (${rowCount} rows)`}
           </Button>
         </div>
       </div>
@@ -416,11 +450,19 @@ export default function GeneratePage() {
                 </p>
               )}
             </div>
-            {generatedData.length > 0 && (
-              <Button variant="outline" size="sm" onClick={exportCsv}>
-                <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
-              </Button>
-            )}
+            <div className="flex items-center gap-3">
+              {runId && (
+                <Link href={`/history/${runId}`} className="flex items-center gap-1.5 text-xs text-indigo-500 hover:underline">
+                  <ExternalLink className="h-3 w-3" />
+                  View in History
+                </Link>
+              )}
+              {generatedData.length > 0 && (
+                <Button variant="outline" size="sm" onClick={exportCsv}>
+                  <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
+                </Button>
+              )}
+            </div>
           </div>
 
           {generatedData.length > 0 ? (

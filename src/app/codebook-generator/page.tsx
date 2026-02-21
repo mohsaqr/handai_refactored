@@ -5,9 +5,11 @@ import { FileUploader } from "@/components/tools/FileUploader";
 import { DataTable } from "@/components/tools/DataTable";
 import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useActiveModel } from "@/lib/hooks";
-import { Download, Loader2, CheckCircle2, AlertCircle, Copy } from "lucide-react";
+import { getPrompt } from "@/lib/prompts";
+import { Download, Loader2, CheckCircle2, AlertCircle, Copy, X } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
 import type { Row } from "@/types";
@@ -22,13 +24,47 @@ const STAGE_LABELS: Record<Stage, string> = {
   done: "Complete",
 };
 
+interface RawTheme {
+  theme: string;
+  description: string;
+  examples: string[];
+}
+
+interface CodeEntry {
+  code: string;
+  definition: string;
+  inclusion: string;
+  exclusion: string;
+  examples: string[];
+}
+
+function cleanJson(raw: string): string {
+  return raw.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+}
+
+function toMarkdown(entries: CodeEntry[]): string {
+  return entries
+    .map(
+      (e) =>
+        `## ${e.code}\n**Definition:** ${e.definition}\n**Include when:** ${e.inclusion}\n**Exclude when:** ${e.exclusion}\n**Examples:**\n${(e.examples || []).map((ex) => `- ${ex}`).join("\n")}`
+    )
+    .join("\n\n");
+}
+
 export default function CodebookGeneratorPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
   const [stage, setStage] = useState<Stage>("idle");
   const [codebook, setCodebook] = useState("");
+  const [codebookStructured, setCodebookStructured] = useState<CodeEntry[]>([]);
   const [copied, setCopied] = useState(false);
   const [useAllRows, setUseAllRows] = useState(false);
+
+  // Phase A / B split state (Improvement 5a)
+  const [discoveryThemes, setDiscoveryThemes] = useState<RawTheme[]>([]);
+  const [discoveryRaw, setDiscoveryRaw] = useState("");
+  const [awaitingReview, setAwaitingReview] = useState(false);
+  const [phaseAQuickMode, setPhaseAQuickMode] = useState(false);
 
   const providerConfig = useActiveModel();
 
@@ -36,7 +72,11 @@ export default function CodebookGeneratorPage() {
     setData(loaded);
     setDataName(name);
     setCodebook("");
+    setCodebookStructured([]);
     setStage("idle");
+    setDiscoveryThemes([]);
+    setDiscoveryRaw("");
+    setAwaitingReview(false);
     toast.success(`Loaded ${loaded.length} rows`);
   };
 
@@ -65,64 +105,74 @@ export default function CodebookGeneratorPage() {
     return result.output as string;
   };
 
-  const generateCodebook = async (quickMode: boolean) => {
+  // Phase A: run Stage 1 discovery only, then pause for review
+  const generatePhaseA = async (quickMode: boolean) => {
     if (data.length === 0) return toast.error("No data loaded");
     if (!providerConfig) return toast.error("No enabled provider configured. Check Settings.");
 
+    setPhaseAQuickMode(quickMode);
+    setUseAllRows(!quickMode);
     const sampleRows = quickMode ? data.slice(0, 30) : data.slice(0, 100);
 
     try {
-      // Stage 1: Discovery
       setStage("discovery");
       const discoveryOutput = await callLLM(
-        `You are a qualitative researcher performing open coding.
-Analyze the provided text samples and identify recurring themes, patterns, and concepts.
-Return a JSON array of raw theme objects:
-[{"theme": "Theme Name", "description": "brief description", "examples": ["quote1", "quote2"]}]
-Return ONLY the JSON array. No other text.`,
+        getPrompt("codebook.discovery"),
         `Analyze these ${sampleRows.length} data samples:\n\n${JSON.stringify(sampleRows, null, 2)}`
       );
 
+      try {
+        const themes = JSON.parse(cleanJson(discoveryOutput)) as RawTheme[];
+        setDiscoveryThemes(themes);
+        setDiscoveryRaw("");
+      } catch {
+        setDiscoveryThemes([]);
+        setDiscoveryRaw(discoveryOutput);
+      }
+
+      setStage("idle");
+      setAwaitingReview(true);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error("Stage 1 failed", { description: msg });
+      setStage("idle");
+    }
+  };
+
+  // Phase B: run Stages 2 + 3 with (possibly edited) themes
+  const confirmAndContinue = async () => {
+    if (!providerConfig) return toast.error("No enabled provider configured. Check Settings.");
+
+    setAwaitingReview(false);
+    const themesJson = JSON.stringify(discoveryThemes);
+
+    try {
       // Stage 2: Consolidation
       setStage("consolidation");
       const consolidationOutput = await callLLM(
-        `You are a qualitative researcher performing axial coding.
-Review the provided list of raw themes and:
-1. Merge overlapping or redundant themes
-2. Group related themes into higher-level categories
-3. Remove themes that appear very rarely
-Return a JSON array of consolidated themes:
-[{"theme": "Theme Name", "category": "Category", "merged_from": ["old1"], "description": "..."}]
-Return ONLY the JSON array. No other text.`,
-        `Consolidate these raw themes:\n\n${discoveryOutput}`
+        getPrompt("codebook.consolidation"),
+        `Consolidate these raw themes:\n\n${themesJson}`
       );
 
-      // Stage 3: Definition
+      // Stage 3: Definition (returns JSON per codebook.definition prompt)
       setStage("definition");
       const definitionOutput = await callLLM(
-        `You are a qualitative researcher creating a formal codebook.
-For each theme, write a formal code definition with:
-- A clear 2-3 sentence definition
-- Inclusion criteria (when to apply)
-- Exclusion criteria (when NOT to apply)
-- 2-3 anchor examples
-
-Format the result as a readable codebook with clear sections for each code.
-Use this format for each code:
-## [CODE NAME]
-**Category:** [category]
-**Definition:** [definition]
-**Include when:** [inclusion]
-**Exclude when:** [exclusion]
-**Examples:**
-- [example 1]
-- [example 2]
-
-Return the full formatted codebook. No JSON.`,
+        getPrompt("codebook.definition"),
         `Create formal definitions for these consolidated themes:\n\n${consolidationOutput}`
       );
 
-      setCodebook(definitionOutput);
+      let structured: CodeEntry[] = [];
+      let mdText = "";
+      try {
+        structured = JSON.parse(cleanJson(definitionOutput)) as CodeEntry[];
+        mdText = toMarkdown(structured);
+      } catch {
+        // Fallback: treat output as raw markdown
+        mdText = definitionOutput;
+      }
+
+      setCodebookStructured(structured);
+      setCodebook(mdText);
       setStage("done");
       toast.success("Codebook generated (3 stages complete)!");
     } catch (err: unknown) {
@@ -130,6 +180,13 @@ Return the full formatted codebook. No JSON.`,
       toast.error("Codebook generation failed", { description: msg });
       setStage("idle");
     }
+  };
+
+  const restart = () => {
+    setAwaitingReview(false);
+    setDiscoveryThemes([]);
+    setDiscoveryRaw("");
+    setStage("idle");
   };
 
   const copyToClipboard = () => {
@@ -146,6 +203,17 @@ Return the full formatted codebook. No JSON.`,
     const a = document.createElement("a");
     a.href = url;
     a.download = `codebook_${dataName || Date.now()}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportJson = () => {
+    if (!codebookStructured.length) return;
+    const blob = new Blob([JSON.stringify(codebookStructured, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `codebook_${dataName || Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -229,25 +297,91 @@ Return the full formatted codebook. No JSON.`,
           </Link>
         )}
 
-        <div className="grid grid-cols-2 gap-4">
-          <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
-            disabled={data.length === 0 || isProcessing || !providerConfig}
-            onClick={() => generateCodebook(true)}>
-            {isProcessing && useAllRows === false ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
-            Quick (30 rows)
-          </Button>
-          <Button variant="outline" size="lg" className="h-12 text-base"
-            disabled={data.length === 0 || isProcessing || !providerConfig}
-            onClick={() => { setUseAllRows(true); generateCodebook(false); }}>
-            {isProcessing && useAllRows ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
-            Full ({Math.min(data.length, 100)} rows)
-          </Button>
-        </div>
+        {!awaitingReview && (
+          <div className="grid grid-cols-2 gap-4">
+            <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
+              disabled={data.length === 0 || isProcessing || !providerConfig || awaitingReview}
+              onClick={() => generatePhaseA(true)}>
+              {isProcessing && !useAllRows ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Quick (30 rows)
+            </Button>
+            <Button variant="outline" size="lg" className="h-12 text-base"
+              disabled={data.length === 0 || isProcessing || !providerConfig || awaitingReview}
+              onClick={() => generatePhaseA(false)}>
+              {isProcessing && useAllRows ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Full ({Math.min(data.length, 100)} rows)
+            </Button>
+          </div>
+        )}
 
         {isProcessing && (
           <p className="text-xs text-muted-foreground text-center">{STAGE_LABELS[stage]}</p>
         )}
       </div>
+
+      {/* ── Review Discovered Themes (Phase A result) ────────────────────── */}
+      {awaitingReview && (
+        <div className="space-y-4 border-t pt-6 pb-8">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Review Discovered Themes</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Stage 1 found {discoveryThemes.length} themes. Remove or rename before consolidation.
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" onClick={restart} className="text-muted-foreground">
+              <X className="h-4 w-4 mr-1.5" /> Restart
+            </Button>
+          </div>
+
+          {discoveryRaw ? (
+            <div className="space-y-2">
+              <p className="text-xs text-amber-600">Stage 1 output could not be parsed as JSON. Edit manually if needed.</p>
+              <pre className="text-xs font-mono bg-muted/20 border rounded p-3 max-h-60 overflow-y-auto whitespace-pre-wrap">{discoveryRaw}</pre>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {discoveryThemes.map((t, idx) => (
+                <div key={idx} className="flex items-start gap-2 p-3 border rounded-lg bg-muted/5">
+                  <div className="flex-1 space-y-1">
+                    <Input
+                      value={t.theme}
+                      onChange={(e) =>
+                        setDiscoveryThemes((prev) =>
+                          prev.map((th, i) => i === idx ? { ...th, theme: e.target.value } : th)
+                        )
+                      }
+                      className="h-7 text-sm font-medium"
+                    />
+                    <p className="text-[11px] text-muted-foreground pl-1">{t.description}</p>
+                  </div>
+                  <button
+                    onClick={() => setDiscoveryThemes((prev) => prev.filter((_, i) => i !== idx))}
+                    className="text-muted-foreground hover:text-destructive mt-1 shrink-0"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <Button
+              size="lg"
+              className="h-10 bg-red-500 hover:bg-red-600 text-white"
+              onClick={confirmAndContinue}
+              disabled={discoveryThemes.length === 0 && !discoveryRaw}
+            >
+              {isProcessing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Confirm &amp; Continue →
+            </Button>
+            <Button variant="outline" size="lg" className="h-10" onClick={restart}>
+              Restart
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* ── Results ────────────────────────────────────────────────────────── */}
       {codebook && (
@@ -257,6 +391,7 @@ Return the full formatted codebook. No JSON.`,
               <h2 className="text-lg font-semibold">Generated Codebook</h2>
               <p className="text-xs text-muted-foreground mt-0.5">
                 {codebook.split("\n").length} lines · {(codebook.length / 1000).toFixed(1)}KB
+                {codebookStructured.length > 0 && ` · ${codebookStructured.length} codes`}
               </p>
             </div>
             <div className="flex gap-2">
@@ -266,6 +401,15 @@ Return the full formatted codebook. No JSON.`,
               </Button>
               <Button variant="outline" size="sm" onClick={exportMarkdown}>
                 <Download className="h-3.5 w-3.5 mr-1.5" /> Export MD
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={exportJson}
+                disabled={codebookStructured.length === 0}
+                title={codebookStructured.length === 0 ? "JSON not available (Stage 3 output could not be parsed)" : undefined}
+              >
+                <Download className="h-3.5 w-3.5 mr-1.5" /> Export JSON
               </Button>
             </div>
           </div>

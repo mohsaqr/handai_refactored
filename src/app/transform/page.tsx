@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useActiveModel } from "@/lib/hooks";
-import { Download, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Download, Loader2, AlertCircle, CheckCircle2, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
@@ -15,6 +15,7 @@ import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
 
 type Row = Record<string, unknown>;
+type RunMode = "preview" | "test" | "full";
 
 const EXAMPLE_PROMPTS: Record<string, string> = {
   "Sentiment analysis": "Classify the sentiment as Positive, Negative, or Neutral. Return only the label.",
@@ -32,10 +33,12 @@ export default function TransformPage() {
   const [selectedCols, setSelectedCols] = useState<string[]>([]);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isTestRun, setIsTestRun] = useState(false);
+  const [runMode, setRunMode] = useState<RunMode>("full");
   const [progress, setProgress] = useState({ completed: 0, total: 0 });
   const [results, setResults] = useState<Row[]>([]);
   const [stats, setStats] = useState<{ success: number; errors: number; avgLatency: number } | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [concurrency, setConcurrency] = useState(5);
 
   const activeModel = useActiveModel();
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
@@ -62,24 +65,29 @@ export default function TransformPage() {
   const toggleAll = () =>
     setSelectedCols(selectedCols.length === allColumns.length ? [] : [...allColumns]);
 
-  const runTransformation = async (testMode: boolean) => {
+  const runTransformation = async (mode: RunMode) => {
     if (data.length === 0) return toast.error("No data loaded");
     if (!systemPrompt.trim()) return toast.error("Enter AI instructions first");
     if (!activeModel) return toast.error("No model configured. Go to Settings.");
     if (selectedCols.length === 0) return toast.error("Select at least one column");
 
-    const targetData = testMode ? data.slice(0, 10) : data;
+    const targetData =
+      mode === "preview" ? data.slice(0, 3) :
+      mode === "test"    ? data.slice(0, 10) :
+      data;
+
+    setRunId(null);
     setIsProcessing(true);
-    setIsTestRun(testMode);
+    setRunMode(mode);
     setProgress({ completed: 0, total: targetData.length });
     setResults([]);
     setStats(null);
 
-    const limit = pLimit(5);
+    const limit = pLimit(concurrency);
     const newResults: Row[] = [...targetData];
     const latencies: number[] = [];
 
-    let runId: string | null = null;
+    let localRunId: string | null = null;
     try {
       const runRes = await fetch("/api/runs", {
         method: "POST",
@@ -95,7 +103,7 @@ export default function TransformPage() {
         }),
       });
       const rd = await runRes.json();
-      runId = rd.id ?? null;
+      localRunId = rd.id ?? null;
     } catch { /* non-fatal */ }
 
     const tasks = targetData.map((row, idx) =>
@@ -136,13 +144,13 @@ export default function TransformPage() {
     setResults(newResults);
     setStats({ success: newResults.length - errors, errors, avgLatency });
 
-    if (runId) {
+    if (localRunId) {
       try {
         await fetch("/api/results", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            runId,
+            runId: localRunId,
             results: newResults.map((r, i) => ({
               rowIndex: i, input: r, output: r.ai_output,
               status: r.status, latency: r.latency_ms, errorMessage: r.error_msg,
@@ -152,9 +160,10 @@ export default function TransformPage() {
       } catch { /* non-fatal */ }
     }
 
+    setRunId(localRunId);
     setIsProcessing(false);
     if (errors > 0) toast.warning(`Done — ${errors} rows had errors`);
-    else toast.success(testMode ? `Test complete (${targetData.length} rows)` : "Transformation complete!");
+    else toast.success(mode === "full" ? "Transformation complete!" : `${mode === "preview" ? "Preview" : "Test"} complete (${targetData.length} rows)`);
   };
 
   const handleExport = () => {
@@ -291,7 +300,7 @@ export default function TransformPage() {
             <div className="flex justify-between text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {isTestRun ? "Test run" : "Full run"} — processing {progress.total} rows…
+                {runMode !== "full" ? (runMode === "preview" ? "Preview" : "Test") + " run" : "Full run"} — processing {progress.total} rows…
               </span>
               <span>{progress.completed} / {progress.total}</span>
             </div>
@@ -301,17 +310,31 @@ export default function TransformPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>Concurrency:</span>
+          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.max(1, c - 1))}>−</button>
+          <span className="px-3 border-x min-w-[2rem] text-center">{concurrency}</span>
+          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.min(10, c + 1))}>+</button>
+          <span className="text-xs">(parallel API calls)</span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3">
+          <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
+            disabled={data.length === 0 || isProcessing || !activeModel || !systemPrompt.trim() || selectedCols.length === 0}
+            onClick={() => runTransformation("preview")}>
+            {isProcessing && runMode === "preview" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            Preview (3 rows)
+          </Button>
           <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
             disabled={data.length === 0 || isProcessing || !activeModel || !systemPrompt.trim() || selectedCols.length === 0}
-            onClick={() => runTransformation(true)}>
-            {isProcessing && isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => runTransformation("test")}>
+            {isProcessing && runMode === "test" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Test (10 rows)
           </Button>
           <Button variant="outline" size="lg" className="h-12 text-base"
             disabled={data.length === 0 || isProcessing || !activeModel || !systemPrompt.trim() || selectedCols.length === 0}
-            onClick={() => runTransformation(false)}>
-            {isProcessing && !isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => runTransformation("full")}>
+            {isProcessing && runMode === "full" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Full Run ({data.length} rows)
           </Button>
         </div>
@@ -325,9 +348,17 @@ export default function TransformPage() {
               <h2 className="text-lg font-semibold">Results</h2>
               <p className="text-xs text-muted-foreground mt-0.5">{results.length} rows transformed</p>
             </div>
-            <Button variant="outline" size="sm" onClick={handleExport}>
-              <Download className="h-4 w-4 mr-2" /> Export CSV
-            </Button>
+            <div className="flex items-center gap-3">
+              {runId && (
+                <Link href={`/history/${runId}`} className="flex items-center gap-1.5 text-xs text-indigo-500 hover:underline">
+                  <ExternalLink className="h-3 w-3" />
+                  View in History
+                </Link>
+              )}
+              <Button variant="outline" size="sm" onClick={handleExport}>
+                <Download className="h-4 w-4 mr-2" /> Export CSV
+              </Button>
+            </div>
           </div>
 
           {stats && (
@@ -339,7 +370,7 @@ export default function TransformPage() {
               <span className="text-muted-foreground text-xs">✓ {stats.success}</span>
               {stats.errors > 0 && <span className="text-red-500 text-xs">✗ {stats.errors}</span>}
               <span className="text-muted-foreground text-xs">⏱ avg {stats.avgLatency}ms</span>
-              {isTestRun && <span className="ml-auto text-xs font-medium text-blue-600 border border-blue-200 px-2 py-0.5 rounded bg-blue-50">Test run · {results.length}/{data.length} rows</span>}
+              {runMode !== "full" && <span className="ml-auto text-xs font-medium text-blue-600 border border-blue-200 px-2 py-0.5 rounded bg-blue-50">{runMode === "preview" ? "Preview" : "Test"} run · {results.length}/{data.length} rows</span>}
             </div>
           )}
 

@@ -9,12 +9,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useActiveModel } from "@/lib/hooks";
-import { Download, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Download, Loader2, CheckCircle2, AlertCircle, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
 
 type Row = Record<string, unknown>;
+type RunMode = "preview" | "test" | "full";
 
 const DEFAULT_PROMPT = `Analyze the provided data and assign qualitative codes.
 
@@ -41,10 +42,12 @@ export default function QualitativeCoderPage() {
   const [selectedCols, setSelectedCols] = useState<string[]>([]);
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_PROMPT);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isTestRun, setIsTestRun] = useState(false);
+  const [runMode, setRunMode] = useState<RunMode>("full");
   const [progress, setProgress] = useState({ completed: 0, total: 0, success: 0, errors: 0 });
   const [results, setResults] = useState<Row[]>([]);
   const [stats, setStats] = useState<{ success: number; errors: number; avgLatency: number } | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [concurrency, setConcurrency] = useState(5);
 
   const provider = useActiveModel();
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
@@ -69,24 +72,29 @@ export default function QualitativeCoderPage() {
   const toggleAll = () =>
     setSelectedCols(selectedCols.length === allColumns.length ? [] : [...allColumns]);
 
-  const runCoding = async (testMode: boolean) => {
+  const runCoding = async (mode: RunMode) => {
     if (data.length === 0) return toast.error("No data loaded");
     if (!systemPrompt.trim()) return toast.error("Enter AI instructions first");
     if (!provider) return toast.error("No model configured. Go to Settings.");
     if (selectedCols.length === 0) return toast.error("Select at least one column");
 
-    const targetData = testMode ? data.slice(0, 10) : data;
+    const targetData =
+      mode === "preview" ? data.slice(0, 3) :
+      mode === "test"    ? data.slice(0, 10) :
+      data;
+
+    setRunId(null);
     setIsProcessing(true);
-    setIsTestRun(testMode);
+    setRunMode(mode);
     setProgress({ completed: 0, total: targetData.length, success: 0, errors: 0 });
     setResults([]);
     setStats(null);
 
-    const limit = pLimit(5);
+    const limit = pLimit(concurrency);
     const newResults: Row[] = [...targetData];
     const latencies: number[] = [];
 
-    let runId: string | null = null;
+    let localRunId: string | null = null;
     try {
       const runRes = await fetch("/api/runs", {
         method: "POST",
@@ -94,7 +102,7 @@ export default function QualitativeCoderPage() {
         body: JSON.stringify({ runType: "qualitative-coder", provider: provider.providerId, model: provider.defaultModel, temperature: 0, systemPrompt, inputFile: dataName || "unnamed", inputRows: targetData.length }),
       });
       const rd = await runRes.json();
-      runId = rd.id ?? null;
+      localRunId = rd.id ?? null;
     } catch { /* non-fatal */ }
 
     const tasks = targetData.map((row, idx) =>
@@ -127,15 +135,16 @@ export default function QualitativeCoderPage() {
     setResults(newResults);
     setStats({ success: newResults.length - errors, errors, avgLatency });
 
-    if (runId) {
+    if (localRunId) {
       try {
-        await fetch("/api/results", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId, results: newResults.map((r, i) => ({ rowIndex: i, input: r, output: r.ai_code, status: r.status, latency: r.latency_ms, errorMessage: r.error_msg })) }) });
+        await fetch("/api/results", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: localRunId, results: newResults.map((r, i) => ({ rowIndex: i, input: r, output: r.ai_code, status: r.status, latency: r.latency_ms, errorMessage: r.error_msg })) }) });
       } catch { /* non-fatal */ }
     }
 
+    setRunId(localRunId);
     setIsProcessing(false);
     if (errors > 0) toast.warning(`Done — ${errors} rows had errors`);
-    else toast.success(testMode ? `Test complete (${targetData.length} rows)` : "Coding complete!");
+    else toast.success(mode === "full" ? "Coding complete!" : `${mode === "preview" ? "Preview" : "Test"} complete (${targetData.length} rows)`);
   };
 
   const handleExport = () => {
@@ -272,7 +281,7 @@ export default function QualitativeCoderPage() {
             <div className="flex justify-between text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {isTestRun ? "Test run" : "Full run"} — coding {progress.total} rows…
+                {runMode !== "full" ? (runMode === "preview" ? "Preview" : "Test") + " run" : "Full run"} — coding {progress.total} rows…
               </span>
               <span>{progress.completed} / {progress.total}</span>
             </div>
@@ -286,17 +295,31 @@ export default function QualitativeCoderPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>Concurrency:</span>
+          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.max(1, c - 1))}>−</button>
+          <span className="px-3 border-x min-w-[2rem] text-center">{concurrency}</span>
+          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.min(10, c + 1))}>+</button>
+          <span className="text-xs">(parallel API calls)</span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3">
+          <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
+            disabled={data.length === 0 || isProcessing || !provider || !systemPrompt.trim() || selectedCols.length === 0}
+            onClick={() => runCoding("preview")}>
+            {isProcessing && runMode === "preview" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            Preview (3 rows)
+          </Button>
           <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
             disabled={data.length === 0 || isProcessing || !provider || !systemPrompt.trim() || selectedCols.length === 0}
-            onClick={() => runCoding(true)}>
-            {isProcessing && isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => runCoding("test")}>
+            {isProcessing && runMode === "test" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Test (10 rows)
           </Button>
           <Button variant="outline" size="lg" className="h-12 text-base"
             disabled={data.length === 0 || isProcessing || !provider || !systemPrompt.trim() || selectedCols.length === 0}
-            onClick={() => runCoding(false)}>
-            {isProcessing && !isTestRun ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            onClick={() => runCoding("full")}>
+            {isProcessing && runMode === "full" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
             Full Run ({data.length} rows)
           </Button>
         </div>
@@ -310,9 +333,17 @@ export default function QualitativeCoderPage() {
               <h2 className="text-lg font-semibold">Results</h2>
               <p className="text-xs text-muted-foreground mt-0.5">{results.length} rows coded</p>
             </div>
-            <Button variant="outline" size="sm" onClick={handleExport}>
-              <Download className="h-4 w-4 mr-2" /> Export CSV
-            </Button>
+            <div className="flex items-center gap-3">
+              {runId && (
+                <Link href={`/history/${runId}`} className="flex items-center gap-1.5 text-xs text-indigo-500 hover:underline">
+                  <ExternalLink className="h-3 w-3" />
+                  View in History
+                </Link>
+              )}
+              <Button variant="outline" size="sm" onClick={handleExport}>
+                <Download className="h-4 w-4 mr-2" /> Export CSV
+              </Button>
+            </div>
           </div>
 
           {stats && (
@@ -324,7 +355,7 @@ export default function QualitativeCoderPage() {
               <span className="text-muted-foreground text-xs">✓ {stats.success}</span>
               {stats.errors > 0 && <span className="text-red-500 text-xs">✗ {stats.errors}</span>}
               <span className="text-muted-foreground text-xs">⏱ avg {stats.avgLatency}ms</span>
-              {isTestRun && <span className="ml-auto text-xs font-medium text-violet-600 border border-violet-200 px-2 py-0.5 rounded bg-violet-50">Test run · {results.length}/{data.length} rows</span>}
+              {runMode !== "full" && <span className="ml-auto text-xs font-medium text-violet-600 border border-violet-200 px-2 py-0.5 rounded bg-violet-50">{runMode === "preview" ? "Preview" : "Test"} run · {results.length}/{data.length} rows</span>}
             </div>
           )}
 
