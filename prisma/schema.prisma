@@ -1,0 +1,123 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  name         String
+  mode         String   // 'transform' or 'generate'
+  settingsJson String   // JSON string
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  runs         Run[]
+  logs         LogEntry[]
+}
+
+model Run {
+  id                 String    @id @default(uuid())
+  sessionId          String
+  session            Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  runType            String    // 'test' or 'full'
+  provider           String
+  model              String
+  temperature        Float
+  maxTokens          Int
+  systemPrompt       String
+  schemaJson         String
+  variablesJson      String
+  inputFile          String
+  inputRows          Int
+  status             String
+  successCount       Int       @default(0)
+  errorCount         Int       @default(0)
+  retryCount         Int       @default(0)
+  avgLatency         Float     @default(0.0)
+  totalDuration      Float     @default(0.0)
+  jsonMode           Boolean   @default(false)
+  maxConcurrency     Int       @default(5)
+  autoRetry          Boolean   @default(true)
+  maxRetryAttempts   Int       @default(3)
+  runSettingsJson    String    @default("{}")
+  startedAt          DateTime  @default(now())
+  completedAt        DateTime?
+
+  results            RunResult[]
+  logs               LogEntry[]
+}
+
+model RunResult {
+  id           String   @id @default(uuid())
+  runId        String
+  run          Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  rowIndex     Int
+  inputJson    String
+  output       String
+  status       String
+  errorType    String?
+  errorMessage String?
+  latency      Float
+  retryAttempt Int      @default(0)
+  createdAt    DateTime @default(now())
+}
+
+model LogEntry {
+  id           String   @id @default(uuid())
+  runId        String?
+  run          Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
+  sessionId    String?
+  session      Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  level        String
+  message      String
+  detailsJson  String   @default("{}")
+  timestamp    DateTime @default(now())
+}
+
+model ProviderSetting {
+  id           String   @id @default(uuid())
+  provider     String
+  settingKey   String
+  settingValue String?
+  updatedAt    DateTime @updatedAt
+
+  @@unique([provider, settingKey])
+}
+
+model ConfiguredProvider {
+  id               String    @id @default(uuid())
+  providerType     String
+  displayName      String
+  baseUrl          String?
+  apiKey           String?
+  defaultModel     String
+  isEnabled        Boolean   @default(false)
+  temperature      Float     @default(0.7)
+  maxTokens        Int       @default(2048)
+  topP             Float     @default(1.0)
+  frequencyPenalty Float     @default(0.0)
+  requestTimeout   Int       @default(120000)
+  maxRetries       Int       @default(3)
+  capabilities     String    @default("[]")
+  totalRequests    Int       @default(0)
+  totalTokens      Int       @default(0)
+  lastTested       DateTime?
+  lastTestStatus   String?
+  lastTestLatency  Float?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model SystemPromptOverride {
+  promptId    String   @id
+  customValue String
+  isEnabled   Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+}

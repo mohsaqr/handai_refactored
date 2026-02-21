@@ -1,0 +1,195 @@
+"use client"
+
+import * as React from "react"
+import {
+    BookOpen,
+    Bot,
+    Columns,
+    Database,
+    Edit3,
+    History,
+    LayoutDashboard,
+    Settings,
+    Users,
+    Wand2,
+    Sparkles,
+    FileArchive,
+    MousePointer2,
+    AlertCircle,
+    Cpu,
+} from "lucide-react"
+
+import {
+    Sidebar,
+    SidebarContent,
+    SidebarFooter,
+    SidebarGroup,
+    SidebarGroupContent,
+    SidebarGroupLabel,
+    SidebarHeader,
+    SidebarMenu,
+    SidebarMenuButton,
+    SidebarMenuItem,
+    SidebarRail,
+} from "@/components/ui/sidebar"
+import { useActiveModel } from "@/lib/hooks"
+
+const data = {
+    navMain: [
+        {
+            title: "Data Processing",
+            items: [
+                {
+                    title: "Transform Data",
+                    url: "/transform",
+                    icon: Wand2,
+                },
+                {
+                    title: "General Automator",
+                    url: "/automator",
+                    icon: Database,
+                },
+                {
+                    title: "Generate Data",
+                    url: "/generate",
+                    icon: Sparkles,
+                },
+                {
+                    title: "Process Documents",
+                    url: "/process-documents",
+                    icon: FileArchive,
+                },
+            ],
+        },
+        {
+            title: "Qualitative Analysis",
+            items: [
+                {
+                    title: "Qualitative Coder",
+                    url: "/qualitative-coder",
+                    icon: Edit3,
+                },
+                {
+                    title: "Consensus Coder",
+                    url: "/consensus-coder",
+                    icon: Users,
+                },
+                {
+                    title: "AI Coder",
+                    url: "/ai-coder",
+                    icon: Bot,
+                },
+                {
+                    title: "Manual Coder",
+                    url: "/manual-coder",
+                    icon: MousePointer2,
+                },
+                {
+                    title: "Model Comparison",
+                    url: "/model-comparison",
+                    icon: Columns,
+                },
+                {
+                    title: "Codebook Generator",
+                    url: "/codebook-generator",
+                    icon: BookOpen,
+                },
+            ],
+        },
+        {
+            title: "System",
+            items: [
+                {
+                    title: "Historical Runs",
+                    url: "/history",
+                    icon: History,
+                },
+                {
+                    title: "Settings",
+                    url: "/settings",
+                    icon: Settings,
+                },
+            ],
+        },
+    ],
+}
+
+function ModelIndicator() {
+    const model = useActiveModel()
+
+    if (!model) {
+        return (
+            <a
+                href="/settings"
+                className="flex items-center gap-2 px-3 py-2 rounded-md text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/30 dark:text-amber-400 hover:opacity-80 transition-opacity border border-amber-200 dark:border-amber-800"
+            >
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">No model configured</span>
+            </a>
+        )
+    }
+
+    return (
+        <a
+            href="/settings"
+            className="flex items-center gap-2 px-3 py-2 rounded-md text-xs hover:bg-muted/50 transition-colors border border-border"
+        >
+            <Cpu className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <div className="flex-1 min-w-0">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground leading-none mb-0.5">
+                    {model.providerId}
+                </div>
+                <div className="font-medium truncate leading-none">{model.defaultModel}</div>
+            </div>
+        </a>
+    )
+}
+
+export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+    return (
+        <Sidebar collapsible="icon" {...props}>
+            <SidebarHeader>
+                <SidebarMenu>
+                    <SidebarMenuItem>
+                        <SidebarMenuButton size="lg" asChild>
+                            <a href="/">
+                                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                                    <LayoutDashboard className="size-4" />
+                                </div>
+                                <div className="flex flex-col gap-0.5 leading-none">
+                                    <span className="font-semibold">Handai</span>
+                                    <span className="">AI Data Suite</span>
+                                </div>
+                            </a>
+                        </SidebarMenuButton>
+                    </SidebarMenuItem>
+                </SidebarMenu>
+            </SidebarHeader>
+            <SidebarContent>
+                {data.navMain.map((group) => (
+                    <SidebarGroup key={group.title}>
+                        <SidebarGroupLabel>{group.title}</SidebarGroupLabel>
+                        <SidebarGroupContent>
+                            <SidebarMenu>
+                                {group.items.map((item) => (
+                                    <SidebarMenuItem key={item.title}>
+                                        <SidebarMenuButton asChild tooltip={item.title}>
+                                            <a href={item.url}>
+                                                <item.icon />
+                                                <span>{item.title}</span>
+                                            </a>
+                                        </SidebarMenuButton>
+                                    </SidebarMenuItem>
+                                ))}
+                            </SidebarMenu>
+                        </SidebarGroupContent>
+                    </SidebarGroup>
+                ))}
+            </SidebarContent>
+            <SidebarFooter className="p-2">
+                <ModelIndicator />
+            </SidebarFooter>
+            <SidebarRail />
+        </Sidebar>
+    )
+}
