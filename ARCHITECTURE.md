@@ -1,6 +1,6 @@
 # Handai Web App — Architecture
 
-> Last updated: 2026-02-22
+> Last updated: 2026-02-22 (rev 2)
 
 ---
 
@@ -46,6 +46,7 @@ web/
 │   └── lib/
 │       ├── ai/providers.ts     ← getModel() factory for all 10 LLM providers
 │       ├── analytics.ts        ← cohenKappa(), pairwiseAgreement()
+│       ├── export.ts           ← shared downloadCSV() — browser blob or Tauri native dialog
 │       ├── hooks.ts            ← useActiveModel() — first enabled+configured provider
 │       ├── prisma.ts           ← Prisma client singleton (dev hot-reload safe)
 │       ├── prompts.ts          ← Prompt registry + localStorage override system
@@ -222,8 +223,11 @@ npm run build (in web/)
 ### Tauri (web/desktop/tauri/)
 - Spawns `server.js` as a `tauri-plugin-shell` sidecar
 - Requires bundling a platform Node.js binary in `src-tauri/binaries/`
-- System WebView (no bundled Chromium)
+- System WebView (no bundled Chromium) — **WKWebView on macOS**
 - Bundle: ~85 MB (Phase A), ~10 MB after Phase B migration
+- **Plugins**: `tauri-plugin-shell` (sidecar), `tauri-plugin-window-state` (size/position), `tauri-plugin-dialog` (native save-file dialog)
+- **CSV export**: WKWebView ignores HTML `download` attribute; detect `window.__TAURI_INTERNALS__` and invoke `save_file` command → `blocking_save_file()` → OS save dialog
+- **DB path**: production sets `DATABASE_URL=file:{app_data_dir}/handai.db` → `~/Library/Application Support/me.saqr.handai/handai.db`
 
 ### Phase B migration path (Tauri only)
 1. Move LLM API route logic → direct browser `fetch()` (no server needed)

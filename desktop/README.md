@@ -76,6 +76,15 @@ rustup (stable toolchain)
 # Windows: WebView2 (ships with Windows 10+)
 ```
 
+### Tauri plugins
+| Plugin | Purpose |
+|---|---|
+| `tauri-plugin-shell` | Spawn Node.js sidecar (production only) |
+| `tauri-plugin-window-state` | Persist window size/position across launches |
+| `tauri-plugin-dialog` | Native OS save-file dialog for CSV export |
+
+> **Why a native dialog for CSV?** WKWebView (macOS system WebView) does not support the HTML `download` attribute. Blob URL + anchor-click silently fails. The web app detects Tauri via `window.__TAURI_INTERNALS__` and invokes the `save_file` command instead.
+
 ### Phase A — Sidecar (current, zero web code changes)
 
 The Tauri app bundles a Node.js binary as an `externalBin` sidecar and spawns the Next.js server on startup.

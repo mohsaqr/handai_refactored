@@ -1,36 +1,107 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Handai — AI Data Suite (Web App)
 
-## Getting Started
+A qualitative and quantitative data analysis suite powered by LLMs. Runs as a web app or as a native desktop app (Electron or Tauri) — no code changes required between the two.
 
-First, run the development server:
+---
+
+## Quick Start
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cd web
+npm install
+npm run dev          # → http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Add an API key
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Open **Settings** → choose a provider (OpenAI, Anthropic, Google, etc.) → paste your key. Local providers (Ollama, LM Studio) are detected automatically — no configuration needed.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
+## Tools
 
-To learn more about Next.js, take a look at the following resources:
+| Tool | Description |
+|---|---|
+| **Manual Coder** | High-speed keyboard-driven qualitative coding |
+| **AI Coder** | AI suggests codes row-by-row; human reviews + overrides |
+| **Qualitative Coder** | Batch LLM coding against a codebook |
+| **Consensus Coder** | Multi-model coding + inter-rater agreement (Cohen's κ) |
+| **Codebook Generator** | LLM-assisted inductive codebook creation |
+| **Transform** | Apply any LLM transformation to CSV rows |
+| **Automator** | Multi-step LLM pipeline builder |
+| **Generate** | Synthesize realistic datasets |
+| **Process Documents** | Extract structured data from PDFs/DOCX |
+| **Model Comparison** | Side-by-side output from N models |
+| **History** | Browse + export all run results |
+| **Settings** | Providers, API keys, prompt templates |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Scripts
 
-## Deploy on Vercel
+```bash
+npm run dev      # Start dev server (port 3000)
+npm run build    # Production build (0 TS errors required)
+npm test         # Vitest — 76 tests across 4 suites
+npm run lint     # ESLint
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+---
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Desktop App
+
+The web app builds with `output: "standalone"` and can be wrapped in a native desktop shell. See [`desktop/README.md`](desktop/README.md) for build instructions.
+
+```
+desktop/
+  electron/    ← Electron wrapper (~160 MB, uses built-in Node.js)
+  tauri/       ← Tauri wrapper (~85 MB, uses system WebView)
+```
+
+---
+
+## Architecture
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the complete technical reference:
+- Data flow + LLM call path
+- API routes reference
+- Database schema
+- Autosave system
+- Stability properties
+- Desktop packaging phases
+
+---
+
+## Supported LLM Providers
+
+OpenAI · Anthropic · Google Gemini · Groq · Together AI · Azure OpenAI · OpenRouter · Ollama (local) · LM Studio (local) · Custom OpenAI-compatible endpoint
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Framework | Next.js 16 (App Router), React 19 |
+| Language | TypeScript (strict) |
+| Styling | Tailwind CSS v4, shadcn/ui |
+| LLM SDK | Vercel AI SDK v4 |
+| Database | Prisma 6 + SQLite |
+| State | Zustand (localStorage persisted) |
+| Testing | Vitest |
+| Desktop | Electron 34 / Tauri 2 |
+
+---
+
+## Project Layout
+
+```
+web/
+├── src/
+│   ├── app/           ← Pages + 10 API routes
+│   ├── components/    ← UI components + tool components
+│   └── lib/           ← Store, hooks, providers, validation, export utils
+├── prisma/            ← Schema + dev database
+├── desktop/           ← Electron + Tauri wrappers
+└── ARCHITECTURE.md    ← Full technical reference
+```
