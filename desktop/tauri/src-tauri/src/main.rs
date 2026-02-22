@@ -16,7 +16,6 @@
 use std::{net::TcpStream, sync::Mutex, thread, time::Duration};
 use tauri::{Manager, State};
 use tauri_plugin_shell::process::CommandChild;
-use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 // Only needed in production builds (sidecar is not spawned in dev)
 #[cfg(not(debug_assertions))]
@@ -56,9 +55,6 @@ fn main() {
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(ServerState(Mutex::new(None)))
         .setup(|_app| {
-            // Restore window size/position from previous session (dev + release)
-            let _ = _app.handle().restore_window_state(StateFlags::all());
-
             // In production builds only: spawn the Next.js standalone server
             // as a sidecar, wait for it, then navigate the WebView.
             // In dev mode, `devUrl` in tauri.conf.json handles loading.
