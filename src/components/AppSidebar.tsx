@@ -33,6 +33,8 @@ import {
     SidebarRail,
 } from "@/components/ui/sidebar"
 import { useActiveModel } from "@/lib/hooks"
+import { useAppStore } from "@/lib/store"
+import { toast } from "sonner"
 
 const data = {
     navMain: [
@@ -145,7 +147,51 @@ function ModelIndicator() {
     )
 }
 
+// Placeholder model names used in the store defaults — safe to overwrite
+const LOCAL_PLACEHOLDERS: Record<string, string[]> = {
+    ollama: ["gpt-oss:latest", ""],
+    lmstudio: ["local-model", ""],
+};
+
+function useLocalProviderDetection() {
+    const { providers, setProviderConfig } = useAppStore();
+
+    React.useEffect(() => {
+        fetch("/api/local-models")
+            .then((r) => r.json())
+            .then((detected: Record<string, string[]>) => {
+                for (const [provider, models] of Object.entries(detected)) {
+                    if (!models.length) continue;
+                    const current = providers[provider];
+                    if (!current) continue;
+
+                    const isPlaceholder = LOCAL_PLACEHOLDERS[provider]?.includes(current.defaultModel);
+                    const modelMissing = !models.includes(current.defaultModel);
+
+                    const updates: Record<string, unknown> = { isEnabled: true };
+                    if (isPlaceholder || modelMissing) updates.defaultModel = models[0];
+
+                    const wasDisabled = !current.isEnabled;
+                    const modelChanged = updates.defaultModel !== undefined;
+
+                    setProviderConfig(provider, updates as Parameters<typeof setProviderConfig>[1]);
+
+                    if (wasDisabled || modelChanged) {
+                        const label = provider === "ollama" ? "Ollama" : "LM Studio";
+                        toast.success(`${label} detected`, {
+                            description: `${models.length} model${models.length !== 1 ? "s" : ""} available · using ${updates.defaultModel ?? current.defaultModel}`,
+                            duration: 4000,
+                        });
+                    }
+                }
+            })
+            .catch(() => {}); // silent if not running
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // run once on mount
+}
+
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+    useLocalProviderDetection();
     return (
         <Sidebar collapsible="icon" {...props}>
             <SidebarHeader>

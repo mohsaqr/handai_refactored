@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAppStore } from "@/lib/store";
 import { PROMPTS, getPrompt, setPromptOverride, clearPromptOverride } from "@/lib/prompts";
 import { toast } from "sonner";
-import { Key, ShieldCheck, Loader2, Wifi, RotateCcw, ChevronDown, Bot, Sliders } from "lucide-react";
+import { Key, ShieldCheck, Loader2, Wifi, RotateCcw, ChevronDown, Bot, Sliders, RefreshCw } from "lucide-react";
 
 const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
@@ -47,13 +47,26 @@ export default function SettingsPage() {
   const [promptValues, setPromptValues] = useState<Record<string, string>>({});
   const [activeSection, setActiveSection] = useState("providers");
   const [openCategories, setOpenCategories] = useState<Set<string>>(new Set());
+  const [localModels, setLocalModels] = useState<Record<string, string[]>>({});
+  const [isDetecting, setIsDetecting] = useState(false);
 
   const providersRef = useRef<HTMLDivElement>(null);
   const promptsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setPromptValues(Object.fromEntries(Object.keys(PROMPTS).map((id) => [id, getPrompt(id)])));
+    detectLocalModels();
   }, []);
+
+  const detectLocalModels = async () => {
+    setIsDetecting(true);
+    try {
+      const res = await fetch("/api/local-models");
+      const data = await res.json();
+      setLocalModels(data);
+    } catch {}
+    finally { setIsDetecting(false); }
+  };
 
   const savePrompt = (id: string) => {
     setPromptOverride(id, promptValues[id]);
@@ -145,9 +158,30 @@ export default function SettingsPage() {
           )}
           <span className="font-semibold text-sm flex-1 truncate">{PROVIDER_LABELS[id] ?? id}</span>
           {config.isLocal && (
-            <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 text-green-600 border-green-500/40">
-              local
-            </Badge>
+            <>
+              <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 text-green-600 border-green-500/40">
+                local
+              </Badge>
+              {localModels[id]?.length ? (
+                <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 text-muted-foreground">
+                  {localModels[id].length} model{localModels[id].length !== 1 ? "s" : ""}
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="text-[9px] px-1.5 py-0 h-4 text-muted-foreground/50">
+                  not detected
+                </Badge>
+              )}
+            </>
+          )}
+          {config.isLocal && (
+            <button
+              onClick={detectLocalModels}
+              disabled={isDetecting}
+              className="p-1 rounded hover:bg-muted/40 text-muted-foreground/60 hover:text-muted-foreground transition-colors"
+              title="Re-detect local models"
+            >
+              <RefreshCw className={`h-3 w-3 ${isDetecting ? "animate-spin" : ""}`} />
+            </button>
           )}
           <div className="flex items-center gap-1.5 ml-2">
             <span className="text-[11px] text-muted-foreground">Enabled</span>
@@ -199,6 +233,28 @@ export default function SettingsPage() {
               onChange={(e) => setProviderConfig(id, { defaultModel: e.target.value })}
               className="h-8 text-xs font-mono"
             />
+            {/* Detected models for local providers */}
+            {config.isLocal && localModels[id]?.length ? (
+              <div className="flex flex-wrap gap-1 pt-0.5">
+                {localModels[id].map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setProviderConfig(id, { defaultModel: m })}
+                    className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                      config.defaultModel === m
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "border-border text-muted-foreground hover:border-primary hover:text-foreground"
+                    }`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            ) : config.isLocal && !isDetecting ? (
+              <p className="text-[10px] text-muted-foreground/60 pt-0.5">
+                Not running — start {PROVIDER_LABELS[id]} to see available models
+              </p>
+            ) : null}
           </div>
           {showBaseUrl && (
             <div className="space-y-1">
