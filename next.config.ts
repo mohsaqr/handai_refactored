@@ -6,6 +6,9 @@ const nextConfig: NextConfig = {
   // node_modules tree. Does not affect `next dev` or web deployment.
   output: "standalone",
   devIndicators: false,
+  // Tauri dev mode loads the Next.js dev server from 127.0.0.1 (not localhost),
+  // triggering a cross-origin warning. Explicitly allow it to silence the noise.
+  allowedDevOrigins: ["127.0.0.1"],
 };
 
 export default nextConfig;
