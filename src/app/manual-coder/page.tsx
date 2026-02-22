@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { FileUploader } from "@/components/tools/FileUploader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,6 +31,7 @@ import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
 import { toast } from "sonner";
 import type { Row } from "@/types";
 import { cn } from "@/lib/utils";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 // ─── Palette (matches Python CODE_COLORS) ─────────────────────────────────
 const CODE_COLORS = [
@@ -74,6 +75,8 @@ const SAMPLE_HIGHLIGHTS: Record<string, Record<string, string>> = {
 // ─── Storage ───────────────────────────────────────────────────────────────
 const SESSIONS_KEY = "mc_named_sessions";
 const SETTINGS_KEY = "mc_settings";
+const AUTOSAVE_KEY = "mc_autosave";
+const AUTOSAVE_PREV_KEY = "mc_autosave_prev";
 
 interface MCSession {
   name: string;
@@ -92,6 +95,13 @@ interface MCSettings {
   autoAdvance: boolean;
   lightMode: boolean;
   horizontalCodes: boolean;
+}
+
+interface MCAutosave {
+  data: Row[]; codes: string[]; highlights: Record<string, string>;
+  codingData: Record<number, string[]>;
+  currentIndex: number; textCols: string[]; dataName: string;
+  sessionName: string; savedAt: string;
 }
 
 function listSessions(): MCSession[] {
@@ -132,7 +142,7 @@ function exportCSV(data: Row[], codes: string[], codingData: Record<number, stri
       });
   const headers = Object.keys(rows[0]);
   const csv = [headers.join(","), ...rows.map((r) => headers.map((h) => `"${String((r as Record<string, unknown>)[h] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -162,6 +172,15 @@ function applyAllHighlights(text: string, codes: string[], allCodes: string[], h
   return result;
 }
 
+function timeAgo(date: Date): string {
+  const secs = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (secs < 10) return "just now";
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ago`;
+}
+
 // ─── Main Page ─────────────────────────────────────────────────────────────
 export default function ManualCoderPage() {
   const [data, setData] = useState<Row[]>([]);
@@ -181,11 +200,86 @@ export default function ManualCoderPage() {
   const [showTextColPicker, setShowTextColPicker] = useState(false);
   const [showAnalytics, setShowAnalytics] = useState(false);
   const [codesInput, setCodesInput] = useState("Positive\nNegative\nNeutral\nDetailed\nBrief");
+  const stateRef = useRef<MCAutosave>({
+    data: [], codes: [], highlights: {}, codingData: {},
+    currentIndex: 0, textCols: [], dataName: "", sessionName: "", savedAt: "",
+  });
+  const [recovered, setRecovered] = useState<{ codedCount: number; savedAt: string; sessionName: string } | null>(null);
+  const [autosaveTime, setAutosaveTime] = useState<Date | null>(null);
+  const [autosaveDisplay, setAutosaveDisplay] = useState("");
+  const [pendingLoad, setPendingLoad] = useState<{ data: Row[]; name: string; sampleKey?: string } | null>(null);
 
   useEffect(() => {
     setSettings(loadSettings());
     setSessions(listSessions());
+    let raw: string | null = null;
+    try { raw = localStorage.getItem(AUTOSAVE_KEY); } catch {}
+    if (!raw) { try { raw = localStorage.getItem(AUTOSAVE_PREV_KEY); } catch {} }
+    if (!raw) return;
+    try {
+      const s = JSON.parse(raw);
+      if (!s.data?.length) return;
+      setData(s.data); setCodes(s.codes || []); setHighlights(s.highlights || {});
+      setCodingData(s.codingData || {});
+      setCurrentIndex(s.currentIndex || 0); setTextCols(s.textCols || []);
+      setDataName(s.dataName || "");
+      setSessionName(s.sessionName || (s.dataName || "").replace(/\.[^.]+$/, ""));
+      setCodesInput((s.codes || []).join("\n"));
+      const cnt = Object.keys(s.codingData || {}).filter(
+        k => (s.codingData[+k] || []).length > 0
+      ).length;
+      setRecovered({ codedCount: cnt, savedAt: s.savedAt || new Date().toISOString(), sessionName: s.sessionName || "" });
+    } catch {}
   }, []);
+
+  // Autosave whenever coding state changes
+  useEffect(() => {
+    if (data.length === 0) return;
+    const payload = {
+      data, codes, highlights, codingData,
+      currentIndex, textCols, dataName, sessionName,
+      savedAt: new Date().toISOString(),
+    };
+    stateRef.current = payload;
+    try {
+      const existing = localStorage.getItem(AUTOSAVE_KEY);
+      if (existing) localStorage.setItem(AUTOSAVE_PREV_KEY, existing);
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+      setAutosaveTime(new Date());
+    } catch {}
+  }, [data, codes, highlights, codingData, currentIndex, textCols, dataName, sessionName]);
+
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      const s = stateRef.current;
+      if (!s.data.length) return;
+      try {
+        const payload = { ...s, savedAt: new Date().toISOString() };
+        const existing = localStorage.getItem(AUTOSAVE_KEY);
+        if (existing) localStorage.setItem(AUTOSAVE_PREV_KEY, existing);
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+      } catch {}
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (data.length === 0) return;
+    stateRef.current = {
+      data, codes, highlights, codingData,
+      currentIndex, textCols, dataName, sessionName,
+      savedAt: stateRef.current.savedAt,
+    };
+  });
+
+  useEffect(() => {
+    if (!autosaveTime) return;
+    setAutosaveDisplay(timeAgo(autosaveTime));
+    const id = setInterval(() => setAutosaveDisplay(timeAgo(autosaveTime)), 15_000);
+    return () => clearInterval(id);
+  }, [autosaveTime]);
 
   const totalRows = data.length;
   const currentRow = data[currentIndex] as Row | undefined;
@@ -193,7 +287,8 @@ export default function ManualCoderPage() {
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
   const codedCount = Object.keys(codingData).filter((k) => (codingData[parseInt(k)] || []).length > 0).length;
 
-  const handleDataLoaded = (newData: Row[], name: string, sampleKey?: string) => {
+  const doDataLoaded = (newData: Row[], name: string, sampleKey?: string) => {
+    setRecovered(null);
     setData(newData);
     setDataName(name);
     setCodingData({});
@@ -210,6 +305,14 @@ export default function ManualCoderPage() {
       setHighlights(SAMPLE_HIGHLIGHTS[sampleKey] || {});
     }
     toast.success(`Loaded ${newData.length} rows`);
+  };
+
+  const handleDataLoaded = (newData: Row[], name: string, sampleKey?: string) => {
+    if (codedCount > 0) {
+      setPendingLoad({ data: newData, name, sampleKey });
+    } else {
+      doDataLoaded(newData, name, sampleKey);
+    }
   };
 
   const loadSample = (key: string) => {
@@ -234,6 +337,20 @@ export default function ManualCoderPage() {
   };
 
   const navigate = (dir: number) => setCurrentIndex((i) => Math.max(0, Math.min(totalRows - 1, i + dir)));
+
+  useEffect(() => {
+    if (data.length === 0) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "ArrowRight" || e.key === "l") { e.preventDefault(); navigate(1); }
+      if (e.key === "ArrowLeft"  || e.key === "h") { e.preventDefault(); navigate(-1); }
+      const n = parseInt(e.key);
+      if (!isNaN(n) && n >= 1 && n <= codes.length) { e.preventDefault(); toggleCode(codes[n - 1]); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [currentIndex, codes, totalRows, data.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateSettings = (patch: Partial<MCSettings>) => {
     const next = { ...settings, ...patch };
@@ -346,6 +463,28 @@ export default function ManualCoderPage() {
   return (
     <div className="max-w-4xl mx-auto space-y-3">
 
+      {/* ── Recovery banner ─────────────────────────────────────────────── */}
+      {recovered && (
+        <div className="flex items-start justify-between gap-3 px-4 py-3 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-700">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <span className="text-amber-500 mt-0.5 shrink-0">⚠</span>
+            <div>
+              <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">Session recovered</p>
+              <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5">
+                {recovered.sessionName && <><strong>{recovered.sessionName}</strong> · </>}
+                {recovered.codedCount} row{recovered.codedCount !== 1 ? "s" : ""} coded
+                {" · "}saved {timeAgo(new Date(recovered.savedAt))}
+              </p>
+            </div>
+          </div>
+          <button onClick={() => setRecovered(null)}
+            className="shrink-0 text-amber-500 hover:text-amber-700 dark:hover:text-amber-300 p-0.5"
+            aria-label="Dismiss">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {/* ── Session bar ─────────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 flex-wrap">
         <div className="text-sm">
@@ -355,6 +494,12 @@ export default function ManualCoderPage() {
           </code>
           <span className="text-muted-foreground ml-2 text-xs">({codedCount}/{totalRows} coded)</span>
         </div>
+        {autosaveTime && (
+          <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+            <span className="text-green-500">✓</span>
+            Autosaved {autosaveDisplay}
+          </span>
+        )}
         <div className="flex gap-2 ml-auto">
           <Button size="sm" variant="outline" onClick={() => setShowSaveDialog((v) => !v)}>
             <Save className="h-3.5 w-3.5 mr-1" /> Save
@@ -590,7 +735,7 @@ export default function ManualCoderPage() {
       {/* ── Code buttons (full-width horizontal) ─────────────────────────── */}
       {settings.horizontalCodes ? (
         <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${codes.length}, 1fr)` }}>
-          {codes.map((code) => {
+          {codes.map((code, idx) => {
             const color = codeColor(code, codes);
             const isApplied = appliedCodes.includes(code);
             return (
@@ -603,11 +748,14 @@ export default function ManualCoderPage() {
                 )}
                 style={{
                   backgroundColor: isApplied ? color : "transparent",
-                  borderColor: isApplied ? color : "#e2e8f0",
                   borderTopWidth: "4px",
                   borderTopColor: color,
+                  borderRightColor: isApplied ? color : "#e2e8f0",
+                  borderBottomColor: isApplied ? color : "#e2e8f0",
+                  borderLeftColor: isApplied ? color : "#e2e8f0",
                 }}
               >
+                {idx < 9 && <span className="text-[9px] opacity-40 absolute top-0.5 right-1">{idx + 1}</span>}
                 {code}
               </button>
             );
@@ -615,7 +763,7 @@ export default function ManualCoderPage() {
         </div>
       ) : (
         <div className="space-y-1">
-          {codes.map((code) => {
+          {codes.map((code, idx) => {
             const color = codeColor(code, codes);
             const isApplied = appliedCodes.includes(code);
             return (
@@ -625,12 +773,15 @@ export default function ManualCoderPage() {
                 className="w-full rounded border text-sm py-2 px-4 text-left transition-all hover:shadow-sm active:scale-[0.99] relative"
                 style={{
                   backgroundColor: isApplied ? color : "transparent",
-                  borderColor: isApplied ? color : "#e2e8f0",
+                  borderTopColor: isApplied ? color : "#e2e8f0",
+                  borderRightColor: isApplied ? color : "#e2e8f0",
+                  borderBottomColor: isApplied ? color : "#e2e8f0",
                   borderLeftWidth: "4px",
                   borderLeftColor: color,
                   fontWeight: isApplied ? 600 : 400,
                 }}
               >
+                {idx < 9 && <span className="text-[9px] opacity-40 absolute top-0.5 right-1">{idx + 1}</span>}
                 {code}
               </button>
             );
@@ -653,6 +804,9 @@ export default function ManualCoderPage() {
         <Button variant="outline" size="sm" onClick={() => navigate(-1)} disabled={currentIndex === 0}>◀ Prev</Button>
         <Button variant="outline" size="sm" onClick={() => navigate(1)} disabled={currentIndex >= totalRows - 1}>Next ▶</Button>
         <Button variant="outline" size="sm" onClick={() => navigate(totalRows - 1 - currentIndex)} disabled={currentIndex >= totalRows - 1}>▶▶</Button>
+      </div>
+      <div className="text-[10px] text-muted-foreground text-center">
+        ← → or h/l navigate &nbsp;·&nbsp; 1–9 toggle codes
       </div>
 
       {/* ── Progress counter + applied codes ─────────────────────────────── */}
@@ -677,6 +831,27 @@ export default function ManualCoderPage() {
       <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
         <div className="bg-green-500 h-full transition-all duration-500" style={{ width: `${(codedCount / totalRows) * 100}%` }} />
       </div>
+
+      {/* ── Pending load dialog ───────────────────────────────────────────── */}
+      <Dialog open={!!pendingLoad} onOpenChange={(open) => { if (!open) setPendingLoad(null); }}>
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Replace current session?</DialogTitle>
+            <DialogDescription>
+              You have <strong>{codedCount} coded row{codedCount !== 1 ? "s" : ""}</strong> in the
+              current session. Loading new data will replace all of this.
+              {" "}Your session has been autosaved and can be restored.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingLoad(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={() => {
+              if (pendingLoad) doDataLoaded(pendingLoad.data, pendingLoad.name, pendingLoad.sampleKey);
+              setPendingLoad(null);
+            }}>Load anyway</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Export Results section ─────────────────────────────────────────── */}
       <div className="border rounded-lg overflow-hidden">
