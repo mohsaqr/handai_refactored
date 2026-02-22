@@ -186,19 +186,10 @@ export default function QualitativeCoderPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
   const [selectedCols, setSelectedCols] = useState<string[]>([]);
-  const [systemPrompt, setSystemPrompt] = useState(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem(PROMPT_KEY) || DEFAULT_PROMPT;
-    }
-    return DEFAULT_PROMPT;
-  });
-  const [codebook, setCodebook] = useState<CodeEntry[]>(() => {
-    if (typeof window !== "undefined") {
-      try { return JSON.parse(localStorage.getItem(CODEBOOK_KEY) || "[]"); } catch { return []; }
-    }
-    return [];
-  });
+  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_PROMPT);
+  const [codebook, setCodebook] = useState<CodeEntry[]>([]);
   const [injectCodebook, setInjectCodebook] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
 
   const csvImportRef = useRef<HTMLInputElement>(null);
 
@@ -216,13 +207,26 @@ export default function QualitativeCoderPage() {
   const provider = useActiveModel();
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
 
+  // Load persisted state after mount (avoids SSR/client hydration mismatch)
   useEffect(() => {
-    localStorage.setItem(PROMPT_KEY, systemPrompt);
-  }, [systemPrompt]);
+    const savedPrompt = localStorage.getItem(PROMPT_KEY);
+    if (savedPrompt) setSystemPrompt(savedPrompt);
+    try {
+      const saved = JSON.parse(localStorage.getItem(CODEBOOK_KEY) || "[]");
+      if (Array.isArray(saved) && saved.length > 0) setCodebook(saved);
+    } catch {}
+    setIsMounted(true);
+  }, []);
 
   useEffect(() => {
+    if (!isMounted) return;
+    localStorage.setItem(PROMPT_KEY, systemPrompt);
+  }, [systemPrompt, isMounted]);
+
+  useEffect(() => {
+    if (!isMounted) return;
     localStorage.setItem(CODEBOOK_KEY, JSON.stringify(codebook));
-  }, [codebook]);
+  }, [codebook, isMounted]);
 
   const handleDataLoaded = (newData: Row[], name: string) => {
     setData(newData);

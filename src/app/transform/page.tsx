@@ -33,12 +33,7 @@ export default function TransformPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
   const [selectedCols, setSelectedCols] = useState<string[]>([]);
-  const [systemPrompt, setSystemPrompt] = useState(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem(PROMPT_KEY) || "";
-    }
-    return "";
-  });
+  const [systemPrompt, setSystemPrompt] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [runMode, setRunMode] = useState<RunMode>("full");
   const [progress, setProgress] = useState({ completed: 0, total: 0 });
@@ -46,6 +41,7 @@ export default function TransformPage() {
   const [stats, setStats] = useState<{ success: number; errors: number; avgLatency: number } | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [concurrency, setConcurrency] = useState(5);
+  const [isMounted, setIsMounted] = useState(false);
 
   const abortRef = useRef(false);
   const startedAtRef = useRef<number>(0);
@@ -54,8 +50,15 @@ export default function TransformPage() {
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
 
   useEffect(() => {
+    const saved = localStorage.getItem(PROMPT_KEY);
+    if (saved) setSystemPrompt(saved);
+    setIsMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isMounted) return;
     localStorage.setItem(PROMPT_KEY, systemPrompt);
-  }, [systemPrompt]);
+  }, [systemPrompt, isMounted]);
 
   const handleDataLoaded = (newData: Row[], name: string) => {
     setData(newData);

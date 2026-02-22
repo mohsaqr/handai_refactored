@@ -58,16 +58,9 @@ export default function AutomatorPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
   const [availableCols, setAvailableCols] = useState<string[]>([]);
-  const [steps, setSteps] = useState<Step[]>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const saved = localStorage.getItem(STEPS_KEY);
-        if (saved) return JSON.parse(saved) as Step[];
-      } catch {}
-    }
-    return [makeStep(1)];
-  });
+  const [steps, setSteps] = useState<Step[]>([makeStep(1)]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isMounted, setIsMounted] = useState(false);
 
   const abortRef = useRef(false);
   const [runMode, setRunMode] = useState<RunMode>("full");
@@ -78,8 +71,17 @@ export default function AutomatorPage() {
   const provider = useActiveModel();
 
   useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STEPS_KEY);
+      if (saved) setSteps(JSON.parse(saved) as Step[]);
+    } catch {}
+    setIsMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isMounted) return;
     localStorage.setItem(STEPS_KEY, JSON.stringify(steps));
-  }, [steps]);
+  }, [steps, isMounted]);
 
   const handleDataLoaded = (newData: Row[], name: string) => {
     setData(newData);
