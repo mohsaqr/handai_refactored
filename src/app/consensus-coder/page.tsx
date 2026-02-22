@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { FileUploader } from "@/components/tools/FileUploader";
 import { DataTable } from "@/components/tools/DataTable";
 import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
@@ -66,6 +66,9 @@ export default function ConsensusCoderPage() {
   const [progress, setProgress] = useState({ completed: 0, total: 0, success: 0, errors: 0 });
   const [results, setResults] = useState<Row[]>([]);
   const [kappaStats, setKappaStats] = useState<KappaStats | null>(null);
+  const abortRef = useRef(false);
+  const startedAtRef = useRef<number>(0);
+
   const [judgeOpen, setJudgeOpen] = useState(true);
   const [worker3Enabled, setWorker3Enabled] = useState(false);
   const [includeJudgeReasoning, setIncludeJudgeReasoning] = useState(true);
@@ -131,6 +134,8 @@ export default function ConsensusCoderPage() {
       mode === "test"    ? data.slice(0, 10) :
       data;
 
+    abortRef.current = false;
+    startedAtRef.current = Date.now();
     setRunId(null);
     setIsProcessing(true);
     setRunMode(mode);
@@ -170,6 +175,7 @@ export default function ConsensusCoderPage() {
 
     const tasks = targetData.map((row, idx) =>
       limit(async () => {
+        if (abortRef.current) return;
         try {
           const subset: Row = {};
           selectedCols.forEach((col) => (subset[col] = row[col]));
@@ -223,6 +229,13 @@ export default function ConsensusCoderPage() {
           setProgress((prev) => ({ ...prev, completed: prev.completed + 1, success: prev.success + 1 }));
         } catch (err) {
           console.error(err);
+          newResults[idx] = {
+            ...row,
+            judge_best_answer: "ERROR",
+            consensus: "Error",
+            kappa: "N/A",
+            error_msg: err instanceof Error ? err.message : String(err),
+          };
           setProgress((prev) => ({ ...prev, completed: prev.completed + 1, errors: prev.errors + 1 }));
         }
       })
@@ -246,7 +259,7 @@ export default function ConsensusCoderPage() {
     if (results.length === 0) return;
     const headers = Object.keys(results[0]);
     const csv = [headers.join(","), ...results.map((row) => headers.map((h) => `"${String(row[h] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = `consensus_results_${dataName || Date.now()}.csv`; a.click();
     URL.revokeObjectURL(url);
@@ -477,8 +490,15 @@ export default function ConsensusCoderPage() {
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 {runMode === "preview" ? "Preview" : runMode === "test" ? "Test run" : "Full run"} — processing {progress.total} rows…
+                {startedAtRef.current > 0 && <span className="ml-1">{Math.round((Date.now() - startedAtRef.current) / 1000)}s elapsed</span>}
               </span>
-              <span>{progress.completed} / {progress.total}</span>
+              <div className="flex items-center gap-2">
+                <span>{progress.completed} / {progress.total}</span>
+                <Button variant="outline" size="sm" onClick={() => { abortRef.current = true; }}
+                  className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                  Stop
+                </Button>
+              </div>
             </div>
             <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
               <div className="bg-purple-500 h-full transition-all duration-300" style={{ width: `${progressPct}%` }} />
@@ -490,7 +510,7 @@ export default function ConsensusCoderPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
             disabled={data.length === 0 || isProcessing || selectedCols.length === 0}
             onClick={() => startProcessing("preview")}>

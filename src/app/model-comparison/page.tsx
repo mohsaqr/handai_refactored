@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { FileUploader } from "@/components/tools/FileUploader";
 import { DataTable } from "@/components/tools/DataTable";
 import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
@@ -36,6 +36,9 @@ export default function ModelComparisonPage() {
   const [results, setResults] = useState<Row[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
   const [concurrency, setConcurrency] = useState(3);
+
+  const abortRef = useRef(false);
+  const startedAtRef = useRef<number>(0);
 
   const providers = useAppStore((state) => state.providers);
   const allProviders = Object.values(providers);
@@ -79,6 +82,8 @@ export default function ModelComparisonPage() {
       mode === "test"    ? data.slice(0, 10) :
       data;
 
+    abortRef.current = false;
+    startedAtRef.current = Date.now();
     setRunId(null);
     setIsProcessing(true);
     setRunMode(mode);
@@ -109,6 +114,7 @@ export default function ModelComparisonPage() {
 
     const tasks = targetData.map((row, idx) =>
       limit(async () => {
+        if (abortRef.current) return;
         try {
           const subset: Row = {};
           selectedCols.forEach((col) => (subset[col] = row[col]));
@@ -120,9 +126,19 @@ export default function ModelComparisonPage() {
           const result = await res.json();
           if (result.error) throw new Error(result.error);
           const updates: Row = {};
-          (result.results as { id: string; output: string }[]).forEach((r) => { updates[`${r.id}_output`] = r.output; });
+          (result.results as { id: string; output: string; latency?: number }[]).forEach((r) => {
+            updates[`${r.id}_output`] = r.output;
+            if (r.latency !== undefined) updates[`${r.id}_latency_ms`] = String(Math.round(r.latency * 1000));
+          });
           newResults[idx] = { ...row, ...updates };
-        } catch (err) { console.error(err); }
+        } catch (err) {
+          console.error(err);
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          const updates: Row = {};
+          activeModels.forEach((m) => { updates[`${m.id}_output`] = "ERROR"; });
+          updates["error_msg"] = errorMsg;
+          newResults[idx] = { ...row, ...updates };
+        }
         setProgress((prev) => ({ ...prev, completed: prev.completed + 1 }));
       })
     );
@@ -138,7 +154,7 @@ export default function ModelComparisonPage() {
     if (!results.length) return;
     const headers = Object.keys(results[0]);
     const csv = [headers.join(","), ...results.map((r) => headers.map((h) => `"${String(r[h] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = `comparison_results_${dataName || Date.now()}.csv`; a.click();
     URL.revokeObjectURL(url);
@@ -295,8 +311,15 @@ export default function ModelComparisonPage() {
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 Comparing {selectedProviders.length} models across {progress.total} rows…
+                {startedAtRef.current > 0 && <span className="ml-1">{Math.round((Date.now() - startedAtRef.current) / 1000)}s elapsed</span>}
               </span>
-              <span>{progress.completed} / {progress.total}</span>
+              <div className="flex items-center gap-2">
+                <span>{progress.completed} / {progress.total}</span>
+                <Button variant="outline" size="sm" onClick={() => { abortRef.current = true; }}
+                  className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                  Stop
+                </Button>
+              </div>
             </div>
             <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
               <div className="bg-blue-500 h-full transition-all duration-300" style={{ width: `${progressPct}%` }} />
@@ -312,7 +335,7 @@ export default function ModelComparisonPage() {
           <span className="text-xs">(parallel API calls)</span>
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
             disabled={data.length === 0 || isProcessing || selectedProviders.length < 2 || !systemPrompt.trim() || selectedCols.length === 0}
             onClick={() => startComparison("preview")}>

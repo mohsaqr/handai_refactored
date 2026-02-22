@@ -129,8 +129,12 @@ export default function ProcessDocumentsPage() {
 
   // Processing
   const [isProcessing, setIsProcessing] = useState(false);
+  const [progress, setProgress] = useState({ completed: 0, total: 0 });
   const [allResults, setAllResults] = useState<Row[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
+
+  const abortRef = useRef(false);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   type RunMode = "preview" | "test" | "full";
 
@@ -203,8 +207,10 @@ export default function ProcessDocumentsPage() {
 ${parsedColumns.length > 0 ? `Output columns: ${parsedColumns.join(", ")}.` : ""}
 Return ONLY a JSON array where each element has consistent field names. No explanations.`;
 
+    abortRef.current = false;
     setRunId(null);
     setIsProcessing(true);
+    setProgress({ completed: 0, total: targetFiles.length });
     const accumulated: Row[] = [];
 
     let localRunId: string | null = null;
@@ -227,6 +233,7 @@ Return ONLY a JSON array where each element has consistent field names. No expla
     } catch { /* non-fatal */ }
 
     for (let i = 0; i < targetFiles.length; i++) {
+      if (abortRef.current) break;
       setFiles((prev) => prev.map((f, idx) => idx === i ? { ...f, status: "processing" } : f));
 
       const entry = targetFiles[i];
@@ -269,6 +276,7 @@ Return ONLY a JSON array where each element has consistent field names. No expla
         setFiles((prev) => prev.map((f, idx) => idx === i ? { ...f, status: "error", error: msg } : f));
         toast.error(`Failed: ${entry.file.name}`, { description: msg });
       }
+      setProgress((prev) => ({ ...prev, completed: prev.completed + 1 }));
     }
 
     setAllResults(accumulated);
@@ -288,7 +296,7 @@ Return ONLY a JSON array where each element has consistent field names. No expla
         headers.map((h) => `"${String(row[h] ?? "").replace(/"/g, '""')}"`).join(",")
       ),
     ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -304,6 +312,22 @@ Return ONLY a JSON array where each element has consistent field names. No expla
       outputColumns,
     };
     setExportedTemplate(JSON.stringify(t, null, 2));
+  };
+
+  const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(e.target.files || []);
+    const valid = selected.filter((f) => {
+      const key = getFileTypeKey(f);
+      return key && enabledTypes.has(key);
+    });
+    const skipped = selected.length - valid.length;
+    if (skipped > 0) toast.warning(`${skipped} file(s) skipped — type not enabled`);
+    if (valid.length > 0) {
+      const folder = (valid[0] as any).webkitRelativePath?.split("/")[0] ?? "selected folder";
+      setFolderPath(folder);
+      setFiles(valid.map((f): FileEntry => ({ file: f, name: f.name, status: "pending" })));
+    }
+    e.target.value = "";
   };
 
   const importTemplate = (json: string) => {
@@ -363,14 +387,29 @@ Return ONLY a JSON array where each element has consistent field names. No expla
               <Input
                 value={folderPath}
                 onChange={(e) => setFolderPath(e.target.value)}
-                placeholder="/path/to/documents"
+                placeholder="Click Browse to select a folder"
                 className="flex-1 text-sm font-mono"
+                readOnly
               />
-              <Button variant="outline" className="shrink-0">Browse</Button>
+              <Button variant="outline" className="shrink-0" onClick={() => folderInputRef.current?.click()}>
+                Browse
+              </Button>
+              {/* Hidden folder picker — webkitdirectory lets the browser traverse a folder */}
+              <input
+                ref={folderInputRef}
+                type="file"
+                // @ts-ignore – webkitdirectory is not in React's built-in types
+                webkitdirectory=""
+                multiple
+                className="hidden"
+                onChange={handleFolderSelect}
+              />
             </div>
-            <p className="text-xs text-muted-foreground">
-              For local deployments. Enter the full path to a directory containing your documents.
-            </p>
+            {files.length > 0 && folderPath && (
+              <p className="text-xs text-muted-foreground">
+                {files.length} file{files.length !== 1 ? "s" : ""} found in <span className="font-mono">{folderPath}</span>
+              </p>
+            )}
           </div>
         ) : (
           <div
@@ -393,7 +432,7 @@ Return ONLY a JSON array where each element has consistent field names. No expla
         )}
 
         {/* Uploaded file list */}
-        {inputMethod === "upload" && files.length > 0 && (
+        {files.length > 0 && (
           <div className="space-y-1.5">
             {files.map((entry, idx) => (
               <div
@@ -555,7 +594,27 @@ Return ONLY a JSON array where each element has consistent field names. No expla
       {/* ── 3. Execute ───────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">3. Execute</h2>
-        <div className="grid grid-cols-3 gap-3">
+
+        {isProcessing && (
+          <div className="space-y-1.5">
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>Processing {progress.completed} of {progress.total} files…</span>
+              <div className="flex items-center gap-2">
+                <span>{progress.total > 0 ? Math.round(progress.completed / progress.total * 100) : 0}%</span>
+                <Button variant="outline" size="sm" onClick={() => { abortRef.current = true; }}
+                  className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                  Stop
+                </Button>
+              </div>
+            </div>
+            <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+              <div className="bg-primary h-full transition-all duration-300"
+                style={{ width: `${progress.total > 0 ? (progress.completed / progress.total) * 100 : 0}%` }} />
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Button
             variant="outline"
             size="lg"

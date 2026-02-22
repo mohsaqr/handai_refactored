@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { DataTable } from "@/components/tools/DataTable";
@@ -15,17 +15,35 @@ import {
     FileText,
     CheckCircle2,
     AlertCircle,
-    Loader2
+    Loader2,
+    Trash2,
+    ChevronRight,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
 import { toast } from "sonner";
+import {
+    Collapsible,
+    CollapsibleContent,
+    CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog";
 
 export default function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
     const { id } = React.use(params);
+    const router = useRouter();
     const [run, setRun] = useState<any>(null);
     const [results, setResults] = useState<any[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
 
     useEffect(() => {
         const fetchRunDetail = async () => {
@@ -38,7 +56,8 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
                     ...JSON.parse(r.inputJson),
                     output: r.output,
                     status: r.status,
-                    latency: r.latency
+                    latency_ms: Math.round((r.latency ?? 0) * 1000),
+                    ...(r.errorMessage ? { error_message: r.errorMessage } : {}),
                 })));
             } catch (err) {
                 toast.error("Failed to load run details");
@@ -48,6 +67,19 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
         };
         fetchRunDetail();
     }, [id]);
+
+    const handleDelete = async () => {
+        setIsDeleting(true);
+        try {
+            const res = await fetch(`/api/runs/${id}`, { method: "DELETE" });
+            if (!res.ok) throw new Error("Delete failed");
+            toast.success("Run deleted");
+            router.push("/history");
+        } catch {
+            toast.error("Failed to delete run");
+            setIsDeleting(false);
+        }
+    };
 
     if (isLoading) {
         return (
@@ -73,7 +105,7 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
             Object.keys(results[0]).join(","),
             ...results.map(row => Object.values(row).map(v => `"${String(v).replace(/"/g, '""')}"`).join(","))
         ].join("\n");
-        const blob = new Blob([csv], { type: "text/csv" });
+        const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -96,9 +128,19 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
                         <p className="text-muted-foreground text-xs">Run ID: {run.id}</p>
                     </div>
                 </div>
-                <Button onClick={handleExport} size="sm">
-                    <Download className="h-4 w-4 mr-2" /> Export CSV
-                </Button>
+                <div className="flex items-center gap-2">
+                    <Button onClick={handleExport} size="sm">
+                        <Download className="h-4 w-4 mr-2" /> Export CSV
+                    </Button>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setShowDeleteDialog(true)}
+                        className="border-red-300 text-red-600 hover:bg-red-50"
+                    >
+                        <Trash2 className="h-4 w-4 mr-2" /> Delete Run
+                    </Button>
+                </div>
             </div>
 
             <div className="grid md:grid-cols-4 gap-6">
@@ -142,6 +184,18 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
                                 Provider: {run.provider}
                             </div>
                         </div>
+                        <Separator />
+                        <Collapsible>
+                            <CollapsibleTrigger className="flex items-center gap-2 w-full text-xs font-medium hover:text-foreground text-muted-foreground">
+                                <ChevronRight className="h-3.5 w-3.5 transition-transform [[data-state=open]_&]:rotate-90" />
+                                System Prompt Used
+                            </CollapsibleTrigger>
+                            <CollapsibleContent>
+                                <pre className="text-xs font-mono bg-muted/10 p-3 mt-2 rounded border whitespace-pre-wrap break-words">
+                                    {run.systemPrompt || "—"}
+                                </pre>
+                            </CollapsibleContent>
+                        </Collapsible>
                     </CardContent>
                 </Card>
 
@@ -155,6 +209,26 @@ export default function RunDetailPage({ params }: { params: Promise<{ id: string
                     </CardContent>
                 </Card>
             </div>
+
+            <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Delete Run?</DialogTitle>
+                        <DialogDescription>
+                            This will permanently delete this run and all its results. This cannot be undone.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <Button variant="outline" onClick={() => setShowDeleteDialog(false)} disabled={isDeleting}>
+                            Cancel
+                        </Button>
+                        <Button variant="destructive" onClick={handleDelete} disabled={isDeleting}>
+                            {isDeleting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+                            Delete
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }

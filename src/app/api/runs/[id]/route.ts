@@ -27,3 +27,17 @@ export async function GET(
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
+
+export async function DELETE(
+    _req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    try {
+        const { id } = await params;
+        await prisma.runResult.deleteMany({ where: { runId: id } });
+        await prisma.run.delete({ where: { id } });
+        return NextResponse.json({ ok: true });
+    } catch (error: any) {
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}

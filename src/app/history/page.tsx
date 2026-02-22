@@ -14,6 +14,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -21,6 +22,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import Link from "next/link";
 import type { RunMeta } from "@/types";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 const PAGE_SIZE = 20;
 
@@ -39,6 +48,8 @@ export default function HistoryPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [providerFilter, setProviderFilter] = useState("all");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const fetchRuns = async (pageNum = 0) => {
     setIsRefreshing(true);
@@ -79,6 +90,23 @@ export default function HistoryPage() {
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const hasNext = page < totalPages - 1;
   const hasPrev = page > 0;
+
+  const handleDelete = async () => {
+    if (!confirmDeleteId) return;
+    setIsDeleting(true);
+    try {
+      const res = await fetch(`/api/runs/${confirmDeleteId}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
+      toast.success("Run deleted");
+      setRuns((prev) => prev.filter((r) => r.id !== confirmDeleteId));
+      setTotal((prev) => prev - 1);
+    } catch {
+      toast.error("Failed to delete run");
+    } finally {
+      setIsDeleting(false);
+      setConfirmDeleteId(null);
+    }
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-0 pb-16">
@@ -217,6 +245,13 @@ export default function HistoryPage() {
                   </div>
                   <div className="text-[9px] text-muted-foreground">{run.inputRows} rows</div>
                 </div>
+                <button
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirmDeleteId(run.id); }}
+                  className="h-8 w-8 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-red-500"
+                  title="Delete run"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
                 <div className="h-8 w-8 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground">
                   <ArrowRight className="h-4 w-4" />
                 </div>
@@ -225,6 +260,27 @@ export default function HistoryPage() {
           </Link>
         ))}
       </div>
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={!!confirmDeleteId} onOpenChange={(open) => { if (!open) setConfirmDeleteId(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Run?</DialogTitle>
+            <DialogDescription>
+              This will permanently delete this run and all its results. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDeleteId(null)} disabled={isDeleting}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={isDeleting}>
+              {isDeleting ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Pagination */}
       {total > PAGE_SIZE && (

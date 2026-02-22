@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { FileUploader } from "@/components/tools/FileUploader";
 import { DataTable } from "@/components/tools/DataTable";
 import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
@@ -42,6 +42,8 @@ interface Step {
 type Row = Record<string, unknown>;
 type RunMode = "preview" | "test" | "full";
 
+const STEPS_KEY = "handai_steps_automator";
+
 function makeStep(idx: number): Step {
   return {
     id: Math.random().toString(36).substr(2, 9),
@@ -56,14 +58,28 @@ export default function AutomatorPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
   const [availableCols, setAvailableCols] = useState<string[]>([]);
-  const [steps, setSteps] = useState<Step[]>([makeStep(1)]);
+  const [steps, setSteps] = useState<Step[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem(STEPS_KEY);
+        if (saved) return JSON.parse(saved) as Step[];
+      } catch {}
+    }
+    return [makeStep(1)];
+  });
   const [isProcessing, setIsProcessing] = useState(false);
+
+  const abortRef = useRef(false);
   const [runMode, setRunMode] = useState<RunMode>("full");
   const [progress, setProgress] = useState({ completed: 0, total: 0 });
   const [results, setResults] = useState<Row[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
 
   const provider = useActiveModel();
+
+  useEffect(() => {
+    localStorage.setItem(STEPS_KEY, JSON.stringify(steps));
+  }, [steps]);
 
   const handleDataLoaded = (newData: Row[], name: string) => {
     setData(newData);
@@ -129,7 +145,7 @@ export default function AutomatorPage() {
       Object.keys(results[0]).join(","),
       ...results.map((row) => Object.values(row).map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")),
     ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -147,6 +163,7 @@ export default function AutomatorPage() {
       mode === "test"    ? data.slice(0, 10) :
       data;
 
+    abortRef.current = false;
     setRunId(null);
     setIsProcessing(true);
     setRunMode(mode);
@@ -176,6 +193,7 @@ export default function AutomatorPage() {
 
     const tasks = targetData.map((row, idx) =>
       limit(async () => {
+        if (abortRef.current) return;
         const t0 = Date.now();
         try {
           const res = await fetch("/api/automator-row", {
@@ -419,7 +437,13 @@ export default function AutomatorPage() {
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 {runMode !== "full" ? (runMode === "preview" ? "Preview" : "Test") + " run" : "Full run"} — running {steps.length}-step pipeline on {progress.total} rows…
               </span>
-              <span>{progress.completed} / {progress.total}</span>
+              <div className="flex items-center gap-2">
+                <span>{progress.completed} / {progress.total}</span>
+                <Button variant="outline" size="sm" onClick={() => { abortRef.current = true; }}
+                  className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                  Stop
+                </Button>
+              </div>
             </div>
             <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
               <div className="bg-indigo-500 h-full transition-all duration-300" style={{ width: `${progressPct}%` }} />
@@ -436,7 +460,7 @@ export default function AutomatorPage() {
           </Link>
         )}
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
             disabled={data.length === 0 || isProcessing || !provider}
             onClick={() => runAutomator("preview")}>

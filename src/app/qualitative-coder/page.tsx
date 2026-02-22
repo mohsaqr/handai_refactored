@@ -434,24 +434,17 @@ export default function QualitativeCoderPage() {
                   <button
                     key={key}
                     onClick={() => loadSample(key)}
-                    className={`w-full text-left px-3 py-2.5 transition-colors hover:bg-muted/40 ${isLoaded ? "bg-green-50 dark:bg-green-950/20" : ""}`}
+                    className={`w-full text-left px-3 py-2 transition-colors hover:bg-muted/40 flex items-center justify-between gap-2 ${isLoaded ? "bg-green-50 dark:bg-green-950/20" : ""}`}
                   >
-                    <div className="flex items-start justify-between gap-1.5">
-                      <div className="min-w-0">
-                        <div className={`text-sm font-medium truncate ${isLoaded ? "text-green-700 dark:text-green-300" : ""}`}>
-                          {ds.name}
-                        </div>
-                        <div className="text-[11px] text-muted-foreground mt-0.5 leading-snug line-clamp-2">
-                          {ds.description}
-                        </div>
+                    <div className="min-w-0">
+                      <div className={`text-xs font-medium truncate ${isLoaded ? "text-green-700 dark:text-green-300" : ""}`}>
+                        {ds.name}
                       </div>
-                      {isLoaded && (
-                        <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0 mt-0.5" />
-                      )}
+                      <div className="text-[10px] text-muted-foreground/70">
+                        {ds.data.length} rows{SAMPLE_CODEBOOKS[key] ? " · codebook" : ""}
+                      </div>
                     </div>
-                    <div className="text-[10px] text-muted-foreground/70 mt-1">
-                      {ds.data.length} rows{SAMPLE_CODEBOOKS[key] ? " · codebook included" : ""}
-                    </div>
+                    {isLoaded && <CheckCircle2 className="h-3 w-3 text-green-500 shrink-0" />}
                   </button>
                 );
               })}

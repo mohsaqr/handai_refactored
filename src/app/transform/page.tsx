@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { FileUploader } from "@/components/tools/FileUploader";
 import { DataTable } from "@/components/tools/DataTable";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,8 @@ import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
 type Row = Record<string, unknown>;
 type RunMode = "preview" | "test" | "full";
 
+const PROMPT_KEY = "handai_prompt_transform";
+
 const EXAMPLE_PROMPTS: Record<string, string> = {
   "Sentiment analysis": "Classify the sentiment as Positive, Negative, or Neutral. Return only the label.",
   "Topic extraction": "Extract the main topic in 3 words or less. Return only the topic.",
@@ -31,7 +33,12 @@ export default function TransformPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
   const [selectedCols, setSelectedCols] = useState<string[]>([]);
-  const [systemPrompt, setSystemPrompt] = useState("");
+  const [systemPrompt, setSystemPrompt] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem(PROMPT_KEY) || "";
+    }
+    return "";
+  });
   const [isProcessing, setIsProcessing] = useState(false);
   const [runMode, setRunMode] = useState<RunMode>("full");
   const [progress, setProgress] = useState({ completed: 0, total: 0 });
@@ -40,8 +47,15 @@ export default function TransformPage() {
   const [runId, setRunId] = useState<string | null>(null);
   const [concurrency, setConcurrency] = useState(5);
 
+  const abortRef = useRef(false);
+  const startedAtRef = useRef<number>(0);
+
   const activeModel = useActiveModel();
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
+
+  useEffect(() => {
+    localStorage.setItem(PROMPT_KEY, systemPrompt);
+  }, [systemPrompt]);
 
   const handleDataLoaded = (newData: Row[], name: string) => {
     setData(newData);
@@ -76,6 +90,8 @@ export default function TransformPage() {
       mode === "test"    ? data.slice(0, 10) :
       data;
 
+    abortRef.current = false;
+    startedAtRef.current = Date.now();
     setRunId(null);
     setIsProcessing(true);
     setRunMode(mode);
@@ -108,6 +124,7 @@ export default function TransformPage() {
 
     const tasks = targetData.map((row, idx) =>
       limit(async () => {
+        if (abortRef.current) return;
         const t0 = Date.now();
         try {
           const subset: Row = {};
@@ -170,13 +187,24 @@ export default function TransformPage() {
     if (!results.length) return;
     const headers = Object.keys(results[0]);
     const csv = [headers.join(","), ...results.map((r) => headers.map((h) => `"${String(r[h] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = `transformed_${dataName || "data"}.csv`; a.click();
     URL.revokeObjectURL(url);
   };
 
   const progressPct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+
+  const etaStr = (() => {
+    if (!isProcessing || progress.completed === 0 || startedAtRef.current === 0) return "";
+    const elapsedMs = Date.now() - startedAtRef.current;
+    const avgMsPerRow = elapsedMs / progress.completed;
+    const etaMs = avgMsPerRow * (progress.total - progress.completed);
+    if (etaMs > 5000) {
+      return etaMs < 60000 ? `~${Math.round(etaMs / 1000)}s left` : `~${Math.floor(etaMs / 60000)}m left`;
+    }
+    return "";
+  })();
 
   return (
     <div className="max-w-4xl mx-auto space-y-0 pb-16">
@@ -301,8 +329,15 @@ export default function TransformPage() {
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 {runMode !== "full" ? (runMode === "preview" ? "Preview" : "Test") + " run" : "Full run"} — processing {progress.total} rows…
+                {etaStr && <span className="text-muted-foreground ml-1">{etaStr}</span>}
               </span>
-              <span>{progress.completed} / {progress.total}</span>
+              <div className="flex items-center gap-2">
+                <span>{progress.completed} / {progress.total}</span>
+                <Button variant="outline" size="sm" onClick={() => { abortRef.current = true; }}
+                  className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                  Stop
+                </Button>
+              </div>
             </div>
             <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
               <div className="bg-blue-500 h-full transition-all duration-300" style={{ width: `${progressPct}%` }} />
@@ -318,7 +353,7 @@ export default function TransformPage() {
           <span className="text-xs">(parallel API calls)</span>
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
             disabled={data.length === 0 || isProcessing || !activeModel || !systemPrompt.trim() || selectedCols.length === 0}
             onClick={() => runTransformation("preview")}>

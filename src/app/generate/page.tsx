@@ -140,7 +140,7 @@ export default function GeneratePage() {
         headers.map((h) => `"${String(row[h] ?? "").replace(/"/g, '""')}"`).join(",")
       ),
     ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -405,7 +405,7 @@ export default function GeneratePage() {
       {/* ── 4. Execute ──────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">4. Execute</h2>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Button
             variant="outline"
             size="lg"
@@ -460,6 +460,17 @@ export default function GeneratePage() {
               {generatedData.length > 0 && (
                 <Button variant="outline" size="sm" onClick={exportCsv}>
                   <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
+                </Button>
+              )}
+              {generatedRaw && outputFormat !== "tabular" && (
+                <Button variant="outline" size="sm" onClick={() => {
+                  const ext = outputFormat === "json" ? "json" : "txt";
+                  const blob = new Blob([generatedRaw], { type: "text/plain;charset=utf-8;" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a"); a.href = url; a.download = `generated_${Date.now()}.${ext}`; a.click();
+                  URL.revokeObjectURL(url);
+                }}>
+                  <Download className="h-3.5 w-3.5 mr-1.5" /> Download
                 </Button>
               )}
             </div>
