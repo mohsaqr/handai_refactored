@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useAppStore } from "@/lib/store";
+import { downloadCSV } from "@/lib/export";
 import { Download, Loader2, CheckCircle2, ChevronDown, ChevronRight, HelpCircle, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import pLimit from "p-limit";
@@ -257,12 +258,7 @@ export default function ConsensusCoderPage() {
 
   const handleExport = () => {
     if (results.length === 0) return;
-    const headers = Object.keys(results[0]);
-    const csv = [headers.join(","), ...results.map((row) => headers.map((h) => `"${String(row[h] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `consensus_results_${dataName || Date.now()}.csv`; a.click();
-    URL.revokeObjectURL(url);
+    downloadCSV(results as Record<string, unknown>[], `consensus_results_${dataName || Date.now()}.csv`);
   };
 
   const progressPct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;

@@ -13,6 +13,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
+import { downloadCSV } from "@/lib/export";
 import { useActiveModel } from "@/lib/hooks";
 import {
   ChevronRight,
@@ -143,11 +144,15 @@ function exportCSV(
   codes: string[],
   codingData: Record<number, string[]>,
   aiData: Record<number, AISuggestion>,
-  mode: "standard" | "onehot" | "withAI"
+  mode: "standard" | "onehot" | "withAI",
+  dataName: string
 ) {
+  const base = dataName.replace(/\.[^.]+$/, "") || "session";
   let rows: Record<string, unknown>[];
+  let filename: string;
   if (mode === "standard") {
     rows = data.map((row, i) => ({ ...row, codes: (codingData[i] || []).join("; ") }));
+    filename = `${base}_ai_coded.csv`;
   } else if (mode === "onehot") {
     rows = data.map((row, i) => {
       const applied = codingData[i] || [];
@@ -155,6 +160,7 @@ function exportCSV(
       codes.forEach((c) => (oneHot[c] = applied.includes(c) ? 1 : 0));
       return { ...row, ...oneHot };
     });
+    filename = `${base}_ai_onehot.csv`;
   } else {
     rows = data.map((row, i) => ({
       ...row,
@@ -163,19 +169,9 @@ function exportCSV(
       ai_reasoning: aiData[i]?.reasoning || "",
       agreement: JSON.stringify((codingData[i] || []).every((c) => (aiData[i]?.codes || []).includes(c))),
     }));
+    filename = `${base}_ai_full.csv`;
   }
-  const headers = Object.keys(rows[0]);
-  const csv = [
-    headers.join(","),
-    ...rows.map((r) => headers.map((h) => `"${String((r as Record<string, unknown>)[h] ?? "").replace(/"/g, '""')}"`).join(",")),
-  ].join("\n");
-  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `ai_coded_${mode}.csv`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadCSV(rows, filename);
 }
 
 function highlightText(text: string, color: string, words: string): string {
@@ -791,11 +787,11 @@ Only use codes from the list. Confidence 0.0–1.0.`,
         {/* Export from analytics */}
         {codedCount > 0 && (
           <div className="flex gap-3 flex-wrap border rounded-lg p-4">
-            <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "standard")}>
+            <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "standard", dataName)}>
               <Download className="h-4 w-4 mr-2" /> Export Human Codes
             </Button>
             {aiCount > 0 && (
-              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "withAI")}>
+              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "withAI", dataName)}>
                 <Download className="h-4 w-4 mr-2" /> Export with AI
               </Button>
             )}
@@ -1261,14 +1257,14 @@ Only use codes from the list. Confidence 0.0–1.0.`,
             <p className="text-sm text-muted-foreground">Code some rows before exporting</p>
           ) : (
             <div className="flex flex-wrap gap-3">
-              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "standard")}>
+              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "standard", dataName)}>
                 <Download className="h-4 w-4 mr-2" /> CSV (standard)
               </Button>
-              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "onehot")}>
+              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "onehot", dataName)}>
                 <Download className="h-4 w-4 mr-2" /> CSV (one-hot)
               </Button>
               {aiCount > 0 && (
-                <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "withAI")}>
+                <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "withAI", dataName)}>
                   <Download className="h-4 w-4 mr-2" /> CSV (with AI comparison)
                 </Button>
               )}

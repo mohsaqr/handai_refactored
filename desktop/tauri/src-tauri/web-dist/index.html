@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Handai</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      background: #1e1b4b;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #fff;
+      gap: 20px;
+    }
+    .wordmark {
+      font-size: 2.5rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+    }
+    .subtitle {
+      font-size: 0.875rem;
+      color: #a5b4fc;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid rgba(165, 180, 252, 0.2);
+      border-top-color: #a5b4fc;
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="wordmark">Handai</div>
+  <div class="subtitle">AI Data Suite</div>
+  <div class="spinner"></div>
+</body>
+</html>

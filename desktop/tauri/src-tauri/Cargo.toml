@@ -16,10 +16,11 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri           = { version = "2", features = ["tray-icon"] }
-tauri-plugin-shell = "2"          # spawn + sidecar support
-serde           = { version = "1", features = ["derive"] }
-serde_json      = "1"
+tauri                    = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell       = "2"          # spawn + sidecar support
+tauri-plugin-window-state = "2"         # persist window size/position
+serde                    = { version = "1", features = ["derive"] }
+serde_json               = "1"
 
 [profile.dev]
 incremental = true

@@ -13,6 +13,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
+import { downloadCSV } from "@/lib/export";
 import {
   ChevronRight,
   ChevronDown,
@@ -26,6 +27,7 @@ import {
   X,
   BarChart2,
   ArrowLeft,
+  Table2,
 } from "lucide-react";
 import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
 import { toast } from "sonner";
@@ -131,24 +133,20 @@ function loadSettings(): MCSettings {
 function saveSettings(s: MCSettings) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
 
 // ─── Export ─────────────────────────────────────────────────────────────────
-function exportCSV(data: Row[], codes: string[], codingData: Record<number, string[]>, mode: "standard" | "onehot") {
-  const rows = mode === "standard"
-    ? data.map((row, i) => ({ ...row, codes: (codingData[i] || []).join("; ") }))
-    : data.map((row, i) => {
-        const applied = codingData[i] || [];
-        const oneHot: Record<string, number> = {};
-        codes.forEach((c) => (oneHot[c] = applied.includes(c) ? 1 : 0));
-        return { ...row, ...oneHot };
-      });
-  const headers = Object.keys(rows[0]);
-  const csv = [headers.join(","), ...rows.map((r) => headers.map((h) => `"${String((r as Record<string, unknown>)[h] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = mode === "onehot" ? "coded_onehot.csv" : "coded_data.csv";
-  a.click();
-  URL.revokeObjectURL(url);
+function exportMC(data: Row[], codes: string[], codingData: Record<number, string[]>, mode: "standard" | "onehot", dataName: string) {
+  const base = dataName.replace(/\.[^.]+$/, "") || "session";
+  if (mode === "standard") {
+    const rows = data.map((row, i) => ({ ...row, codes: (codingData[i] || []).join("; ") }));
+    downloadCSV(rows as Record<string, unknown>[], `${base}_coded.csv`);
+  } else {
+    const rows = data.map((row, i) => {
+      const applied = codingData[i] || [];
+      const oneHot: Record<string, number> = {};
+      codes.forEach((c) => (oneHot[c] = applied.includes(c) ? 1 : 0));
+      return { ...row, ...oneHot };
+    });
+    downloadCSV(rows as Record<string, unknown>[], `${base}_onehot.csv`);
+  }
 }
 
 // ─── Word highlight ───────────────────────────────────────────────────────
@@ -199,6 +197,8 @@ export default function ManualCoderPage() {
   const [showHighlighter, setShowHighlighter] = useState(false);
   const [showTextColPicker, setShowTextColPicker] = useState(false);
   const [showAnalytics, setShowAnalytics] = useState(false);
+  const [showTable, setShowTable] = useState(false);
+  const [tableFilter, setTableFilter] = useState<"all" | "coded" | "uncoded">("all");
   const [codesInput, setCodesInput] = useState("Positive\nNegative\nNeutral\nDetailed\nBrief");
   const stateRef = useRef<MCAutosave>({
     data: [], codes: [], highlights: {}, codingData: {},
@@ -485,149 +485,6 @@ export default function ManualCoderPage() {
         </div>
       )}
 
-      {/* ── Session bar ─────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="text-sm">
-          <span className="font-medium">Session: </span>
-          <code className="text-green-600 dark:text-green-400 text-xs bg-green-50 dark:bg-green-950/30 px-1.5 py-0.5 rounded">
-            {sessionName || dataName || "untitled"}
-          </code>
-          <span className="text-muted-foreground ml-2 text-xs">({codedCount}/{totalRows} coded)</span>
-        </div>
-        {autosaveTime && (
-          <span className="text-[11px] text-muted-foreground flex items-center gap-1">
-            <span className="text-green-500">✓</span>
-            Autosaved {autosaveDisplay}
-          </span>
-        )}
-        <div className="flex gap-2 ml-auto">
-          <Button size="sm" variant="outline" onClick={() => setShowSaveDialog((v) => !v)}>
-            <Save className="h-3.5 w-3.5 mr-1" /> Save
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => setShowSessions((v) => !v)}>
-            <FolderOpen className="h-3.5 w-3.5 mr-1" /> Load
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => setShowAnalytics((v) => !v)}>
-            <BarChart2 className="h-3.5 w-3.5 mr-1" /> Analytics
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => exportCSV(data, codes, codingData, "standard")} title="Export standard CSV">
-            <Download className="h-3.5 w-3.5 mr-1" /> CSV
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => exportCSV(data, codes, codingData, "onehot")} title="One-hot encoding">
-            1/0
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => { setData([]); setCodingData({}); }} title="Close session">
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
-
-      {/* Save dialog */}
-      {showSaveDialog && (
-        <div className="flex gap-2 items-center p-3 bg-muted/30 rounded-lg border">
-          <Input
-            value={sessionName}
-            onChange={(e) => setSessionName(e.target.value)}
-            placeholder="Session name..."
-            className="h-8 text-sm"
-            onKeyDown={(e) => e.key === "Enter" && saveSession()}
-            autoFocus
-          />
-          <Button size="sm" onClick={() => saveSession()}>Save</Button>
-          <Button size="sm" variant="ghost" onClick={() => setShowSaveDialog(false)}>Cancel</Button>
-        </div>
-      )}
-
-      {/* Session browser */}
-      {showSessions && (
-        <div className="border border-dashed rounded-xl overflow-hidden">
-          <div className="px-4 py-2 border-b text-sm font-medium">Saved Sessions</div>
-          <div className="p-3 space-y-1.5 max-h-64 overflow-y-auto">
-            {sessions.length > 0 ? sessions.map((s) => {
-              const coded = Object.keys(s.codingData).filter((k) => (s.codingData[parseInt(k)] || []).length > 0).length;
-              return (
-                <div key={s.name} className="flex items-center justify-between p-2 rounded hover:bg-muted/30 border">
-                  <div>
-                    <span className="text-sm font-medium">{s.name}</span>
-                    <span className="text-[10px] text-muted-foreground ml-2">{s.data.length} rows · {coded} coded · {new Date(s.savedAt).toLocaleDateString()}</span>
-                  </div>
-                  <div className="flex gap-1.5">
-                    <Button size="sm" variant="outline" className="h-7" onClick={() => loadSession(s)}>Load</Button>
-                    <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive" onClick={() => { deleteStoredSession(s.name); setSessions(listSessions()); }}>
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </div>
-                </div>
-              );
-            }) : <p className="text-sm text-muted-foreground p-2">No saved sessions</p>}
-          </div>
-        </div>
-      )}
-
-      {/* ── Analytics panel ───────────────────────────────────────────────── */}
-      {showAnalytics && (() => {
-        const codeStats = codes.map((code) => {
-          const count = Object.values(codingData).filter((cds) => cds.includes(code)).length;
-          const multiCount = Object.values(codingData).filter((cds) => cds.length > 1 && cds.includes(code)).length;
-          return { code, count, multiCount };
-        });
-        const multiCodeRows = Object.values(codingData).filter((cds) => cds.length > 1).length;
-        return (
-          <div className="border rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b bg-muted/20 font-medium text-sm flex items-center justify-between">
-              <span className="flex items-center gap-2"><BarChart2 className="h-4 w-4 text-green-500" /> Analytics — {sessionName || dataName}</span>
-              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setShowAnalytics(false)}><X className="h-3.5 w-3.5" /></Button>
-            </div>
-            <div className="p-4 space-y-5">
-              {/* Summary cards */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {[
-                  { label: "Total Rows", value: totalRows, color: "text-foreground" },
-                  { label: "Coded", value: codedCount, color: "text-green-600" },
-                  { label: "Uncoded", value: totalRows - codedCount, color: "text-muted-foreground" },
-                  { label: "Progress", value: `${Math.round((codedCount / totalRows) * 100)}%`, color: "text-green-600" },
-                ].map((s) => (
-                  <div key={s.label} className="border rounded-lg p-3 text-center">
-                    <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
-                    <div className="text-xs text-muted-foreground mt-1">{s.label}</div>
-                  </div>
-                ))}
-              </div>
-              {/* Progress bar */}
-              <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
-                <div className="bg-green-500 h-full transition-all" style={{ width: `${(codedCount / totalRows) * 100}%` }} />
-              </div>
-              {/* Code frequency */}
-              <div>
-                <div className="text-sm font-semibold mb-3">Code Frequency</div>
-                <div className="space-y-2">
-                  {codeStats.sort((a, b) => b.count - a.count).map(({ code, count }) => {
-                    const color = codeColor(code, codes);
-                    const pct = totalRows > 0 ? (count / totalRows) * 100 : 0;
-                    return (
-                      <div key={code} className="flex items-center gap-3">
-                        <span className="text-xs w-36 truncate shrink-0 font-medium" title={code}>{code}</span>
-                        <div className="flex-1 bg-muted rounded h-5 overflow-hidden">
-                          <div className="h-full rounded transition-all" style={{ width: `${pct}%`, backgroundColor: color }} />
-                        </div>
-                        <span className="text-xs text-right w-24 shrink-0 text-muted-foreground">
-                          {count} rows ({Math.round(pct)}%)
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              {/* Multi-code info */}
-              <div className="text-xs text-muted-foreground border-t pt-3">
-                <span className="font-medium">{multiCodeRows}</span> rows have multiple codes applied ·{" "}
-                <span className="font-medium">{Object.values(codingData).reduce((sum, cds) => sum + cds.length, 0)}</span> total code assignments
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
       {/* ── Word Highlighter (collapsible) ──────────────────────────────── */}
       <Collapsible open={showHighlighter} onOpenChange={setShowHighlighter}>
         <CollapsibleTrigger className="flex items-center gap-2 text-sm w-full px-3 py-2 rounded border hover:bg-muted/30 transition-colors">
@@ -798,6 +655,244 @@ export default function ManualCoderPage() {
         Next ▶
       </Button>
 
+      {/* ── Session bar ─────────────────────────────────────────────────── */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="text-sm">
+          <span className="font-medium">Session: </span>
+          <code className="text-green-600 dark:text-green-400 text-xs bg-green-50 dark:bg-green-950/30 px-1.5 py-0.5 rounded">
+            {sessionName || dataName || "untitled"}
+          </code>
+          <span className="text-muted-foreground ml-2 text-xs">({codedCount}/{totalRows} coded)</span>
+        </div>
+        {autosaveTime && (
+          <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+            <span className="text-green-500">✓</span>
+            Autosaved {autosaveDisplay}
+          </span>
+        )}
+        <div className="flex gap-2 ml-auto">
+          <Button size="sm" variant="outline" onClick={() => setShowSaveDialog((v) => !v)}>
+            <Save className="h-3.5 w-3.5 mr-1" /> Save
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setShowSessions((v) => !v)}>
+            <FolderOpen className="h-3.5 w-3.5 mr-1" /> Load
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setShowAnalytics((v) => !v)}>
+            <BarChart2 className="h-3.5 w-3.5 mr-1" /> Analytics
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setShowTable((v) => !v)}>
+            <Table2 className="h-3.5 w-3.5 mr-1" /> Table
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => exportMC(data, codes, codingData, "standard", dataName)} title="Export standard CSV">
+            <Download className="h-3.5 w-3.5 mr-1" /> CSV
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => exportMC(data, codes, codingData, "onehot", dataName)} title="One-hot encoding">
+            1/0
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => { setData([]); setCodingData({}); }} title="Close session">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+
+      {/* Save dialog */}
+      {showSaveDialog && (
+        <div className="flex gap-2 items-center p-3 bg-muted/30 rounded-lg border">
+          <Input
+            value={sessionName}
+            onChange={(e) => setSessionName(e.target.value)}
+            placeholder="Session name..."
+            className="h-8 text-sm"
+            onKeyDown={(e) => e.key === "Enter" && saveSession()}
+            autoFocus
+          />
+          <Button size="sm" onClick={() => saveSession()}>Save</Button>
+          <Button size="sm" variant="ghost" onClick={() => setShowSaveDialog(false)}>Cancel</Button>
+        </div>
+      )}
+
+      {/* Session browser */}
+      {showSessions && (
+        <div className="border border-dashed rounded-xl overflow-hidden">
+          <div className="px-4 py-2 border-b text-sm font-medium">Saved Sessions</div>
+          <div className="p-3 space-y-1.5 max-h-64 overflow-y-auto">
+            {sessions.length > 0 ? sessions.map((s) => {
+              const coded = Object.keys(s.codingData).filter((k) => (s.codingData[parseInt(k)] || []).length > 0).length;
+              return (
+                <div key={s.name} className="flex items-center justify-between p-2 rounded hover:bg-muted/30 border">
+                  <div>
+                    <span className="text-sm font-medium">{s.name}</span>
+                    <span className="text-[10px] text-muted-foreground ml-2">{s.data.length} rows · {coded} coded · {new Date(s.savedAt).toLocaleDateString()}</span>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <Button size="sm" variant="outline" className="h-7" onClick={() => loadSession(s)}>Load</Button>
+                    <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive" onClick={() => { deleteStoredSession(s.name); setSessions(listSessions()); }}>
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            }) : <p className="text-sm text-muted-foreground p-2">No saved sessions</p>}
+          </div>
+        </div>
+      )}
+
+      {/* ── Analytics panel ───────────────────────────────────────────────── */}
+      {showAnalytics && (() => {
+        const codeStats = codes.map((code) => {
+          const count = Object.values(codingData).filter((cds) => cds.includes(code)).length;
+          const multiCount = Object.values(codingData).filter((cds) => cds.length > 1 && cds.includes(code)).length;
+          return { code, count, multiCount };
+        });
+        const multiCodeRows = Object.values(codingData).filter((cds) => cds.length > 1).length;
+        return (
+          <div className="border rounded-lg overflow-hidden">
+            <div className="px-4 py-3 border-b bg-muted/20 font-medium text-sm flex items-center justify-between">
+              <span className="flex items-center gap-2"><BarChart2 className="h-4 w-4 text-green-500" /> Analytics — {sessionName || dataName}</span>
+              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setShowAnalytics(false)}><X className="h-3.5 w-3.5" /></Button>
+            </div>
+            <div className="p-4 space-y-5">
+              {/* Summary cards */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {[
+                  { label: "Total Rows", value: totalRows, color: "text-foreground" },
+                  { label: "Coded", value: codedCount, color: "text-green-600" },
+                  { label: "Uncoded", value: totalRows - codedCount, color: "text-muted-foreground" },
+                  { label: "Progress", value: `${Math.round((codedCount / totalRows) * 100)}%`, color: "text-green-600" },
+                ].map((s) => (
+                  <div key={s.label} className="border rounded-lg p-3 text-center">
+                    <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
+                    <div className="text-xs text-muted-foreground mt-1">{s.label}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Progress bar */}
+              <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
+                <div className="bg-green-500 h-full transition-all" style={{ width: `${(codedCount / totalRows) * 100}%` }} />
+              </div>
+              {/* Code frequency */}
+              <div>
+                <div className="text-sm font-semibold mb-3">Code Frequency</div>
+                <div className="space-y-2">
+                  {codeStats.sort((a, b) => b.count - a.count).map(({ code, count }) => {
+                    const color = codeColor(code, codes);
+                    const pct = totalRows > 0 ? (count / totalRows) * 100 : 0;
+                    return (
+                      <div key={code} className="flex items-center gap-3">
+                        <span className="text-xs w-36 truncate shrink-0 font-medium" title={code}>{code}</span>
+                        <div className="flex-1 bg-muted rounded h-5 overflow-hidden">
+                          <div className="h-full rounded transition-all" style={{ width: `${pct}%`, backgroundColor: color }} />
+                        </div>
+                        <span className="text-xs text-right w-24 shrink-0 text-muted-foreground">
+                          {count} rows ({Math.round(pct)}%)
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              {/* Multi-code info */}
+              <div className="text-xs text-muted-foreground border-t pt-3">
+                <span className="font-medium">{multiCodeRows}</span> rows have multiple codes applied ·{" "}
+                <span className="font-medium">{Object.values(codingData).reduce((sum, cds) => sum + cds.length, 0)}</span> total code assignments
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Coded Table panel ─────────────────────────────────────────────── */}
+      {showTable && (() => {
+        const firstTextCol = textCols[0] || allColumns[0] || "";
+        const tableRows = data.map((row, i) => ({ row, i, applied: codingData[i] || [] }))
+          .filter(({ applied }) =>
+            tableFilter === "all" ||
+            (tableFilter === "coded") === applied.length > 0
+          );
+        return (
+          <div className="border rounded-lg overflow-hidden">
+            <div className="px-4 py-2.5 border-b bg-muted/20 flex items-center justify-between gap-3">
+              <span className="text-sm font-medium flex items-center gap-2">
+                <Table2 className="h-4 w-4 text-primary" />
+                Coded Table — {codedCount}/{totalRows}
+              </span>
+              <div className="flex items-center gap-1.5">
+                {(["all", "coded", "uncoded"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setTableFilter(f)}
+                    className={cn(
+                      "px-2.5 py-0.5 rounded-full text-xs font-medium border transition-colors",
+                      tableFilter === f
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "border-border text-muted-foreground hover:bg-muted/40"
+                    )}
+                  >
+                    {f.charAt(0).toUpperCase() + f.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <Button size="icon" variant="ghost" className="h-7 w-7 ml-auto" onClick={() => setShowTable(false)}>
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <div className="overflow-y-auto" style={{ maxHeight: "18rem" }}>
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-muted/80 border-b z-10">
+                  <tr>
+                    <th className="px-3 py-1.5 text-left font-medium w-10">#</th>
+                    {firstTextCol && <th className="px-3 py-1.5 text-left font-medium">Text</th>}
+                    <th className="px-3 py-1.5 text-left font-medium">Codes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tableRows.map(({ row, i, applied }) => (
+                    <tr
+                      key={i}
+                      className={cn(
+                        "border-b last:border-0 cursor-pointer hover:bg-muted/30 transition-colors",
+                        i === currentIndex && "bg-primary/5"
+                      )}
+                      onClick={() => { setCurrentIndex(i); setShowTable(false); }}
+                    >
+                      <td className="px-3 py-1.5 text-muted-foreground tabular-nums">{i + 1}</td>
+                      {firstTextCol && (
+                        <td className="px-3 py-1.5 max-w-xs truncate text-muted-foreground">
+                          {String(row[firstTextCol] ?? "").slice(0, 60)}
+                          {String(row[firstTextCol] ?? "").length > 60 && "…"}
+                        </td>
+                      )}
+                      <td className="px-3 py-1.5">
+                        <div className="flex flex-wrap gap-1">
+                          {applied.length > 0
+                            ? applied.map((c) => (
+                                <span
+                                  key={c}
+                                  className="px-1.5 py-0.5 rounded text-[10px] font-medium"
+                                  style={{ backgroundColor: codeColor(c, codes) }}
+                                >
+                                  {c}
+                                </span>
+                              ))
+                            : <span className="text-muted-foreground italic">—</span>}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {tableRows.length === 0 && (
+                    <tr>
+                      <td colSpan={firstTextCol ? 3 : 2} className="px-3 py-4 text-center text-muted-foreground italic">
+                        No rows match this filter
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Navigation bar ───────────────────────────────────────────────── */}
       <div className="grid grid-cols-4 gap-2">
         <Button variant="outline" size="sm" onClick={() => navigate(-5)} disabled={currentIndex === 0}>◀◀</Button>
@@ -861,10 +956,10 @@ export default function ManualCoderPage() {
             <p className="text-sm text-muted-foreground">Code some rows before exporting</p>
           ) : (
             <div className="flex gap-3">
-              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, "standard")}>
+              <Button variant="outline" onClick={() => exportMC(data, codes, codingData, "standard", dataName)}>
                 <Download className="h-4 w-4 mr-2" /> Export CSV (standard)
               </Button>
-              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, "onehot")}>
+              <Button variant="outline" onClick={() => exportMC(data, codes, codingData, "onehot", dataName)}>
                 <Download className="h-4 w-4 mr-2" /> Export CSV (one-hot)
               </Button>
             </div>

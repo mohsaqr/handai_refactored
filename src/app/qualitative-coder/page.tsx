@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useActiveModel } from "@/lib/hooks";
+import { downloadCSV } from "@/lib/export";
 import { Download, Loader2, CheckCircle2, AlertCircle, ExternalLink, Plus, Trash2, Upload } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -388,12 +389,7 @@ export default function QualitativeCoderPage() {
 
   const handleExport = () => {
     if (!results.length) return;
-    const headers = Object.keys(results[0]);
-    const csv = [headers.join(","), ...results.map((r) => headers.map((h) => `"${String(r[h] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `qualitative_coded_${dataName || "data"}.csv`; a.click();
-    URL.revokeObjectURL(url);
+    downloadCSV(results as Record<string, unknown>[], `qualitative_coded_${dataName || "data"}.csv`);
   };
 
   const progressPct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
