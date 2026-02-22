@@ -1,21 +1,29 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { FileUploader } from "@/components/tools/FileUploader";
 import { DataTable } from "@/components/tools/DataTable";
-import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
+
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useActiveModel } from "@/lib/hooks";
-import { Download, Loader2, CheckCircle2, AlertCircle, ExternalLink } from "lucide-react";
+import { Download, Loader2, CheckCircle2, AlertCircle, ExternalLink, Plus, Trash2, Upload } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
 
 type Row = Record<string, unknown>;
 type RunMode = "preview" | "test" | "full";
+
+const PROMPT_KEY = "handai_prompt_qualcoder";
+const CODEBOOK_KEY = "handai_codebook_qualcoder";
+
+type CodeEntry = { id: string; code: string; description: string; example: string };
 
 const DEFAULT_PROMPT = `Analyze the provided data and assign qualitative codes.
 
@@ -27,6 +35,108 @@ Instructions:
 
 Respond with ONLY the comma-separated codes. Nothing else.`;
 
+// ─── Sample codebooks — loaded automatically when a sample dataset is selected ──
+const SAMPLE_CODEBOOKS: Record<string, Omit<CodeEntry, "id">[]> = {
+  product_reviews: [
+    { code: "Positive",           description: "Satisfaction, praise, or happiness with the product",         example: "I absolutely love this product! Best purchase ever." },
+    { code: "Negative",           description: "Dissatisfaction, frustration, or strong criticism",           example: "Terrible experience. Would not recommend to anyone." },
+    { code: "Neutral / Mixed",    description: "Balanced or ambivalent views without strong polarity",        example: "It's okay, nothing special but does the job." },
+    { code: "Quality Issue",      description: "Defects, durability problems, or poor construction",          example: "Stitching came undone after first wash." },
+    { code: "Shipping / Packaging", description: "Delivery delays, damaged packaging, or wrong items",        example: "Arrived damaged. Packaging was inadequate." },
+    { code: "Value for Money",    description: "Price relative to quality or competing products",             example: "Way overpriced for what you get." },
+  ],
+  healthcare_interviews: [
+    { code: "Burnout",            description: "Emotional, physical, or mental exhaustion from workload",     example: "Burnout is real and it's everywhere." },
+    { code: "Resilience",         description: "Capacity to find meaning, cope with stress, or persevere",   example: "What keeps me going is the patients." },
+    { code: "Team Support",       description: "Positive collegial relationships and mutual support",         example: "Team support makes all the difference." },
+    { code: "Resource Shortage",  description: "Understaffing, overwork, pay inequity, or inadequate tools", example: "We're chronically underpaid and overworked." },
+    { code: "Administrative Burden", description: "Paperwork, bureaucracy, or non-clinical demands",         example: "I spend more time on paperwork than with patients." },
+    { code: "Work-Life Impact",   description: "Effects on personal life, mental health, or relationships",  example: "Emotional numbness damages personal relationships." },
+  ],
+  support_tickets: [
+    { code: "Bug Report",         description: "Software defects, crashes, or unexpected behavior",           example: "App crashes immediately after opening on iOS 17." },
+    { code: "Feature Request",    description: "Requests for new functionality or improvements",              example: "Would love to see a dark mode option in the app." },
+    { code: "Billing Issue",      description: "Duplicate charges, incorrect invoices, or refund requests",   example: "I was charged twice for the same subscription." },
+    { code: "Access / Login",     description: "Authentication failures, account lockouts, or permissions",   example: "I've been trying to login for 3 days." },
+    { code: "Performance",        description: "Slowness, timeouts, or system degradation",                   example: "Pages take 30+ seconds to load." },
+    { code: "Critical / Blocking", description: "Issues preventing business operations or data loss",         example: "This is blocking our monthly reporting." },
+  ],
+  learning_experience: [
+    { code: "Positive Experience", description: "Overall satisfaction with online learning benefits",         example: "Online learning has given me flexibility I never had before." },
+    { code: "Negative Experience", description: "Frustration or dissatisfaction with the online format",     example: "The technical issues are constant." },
+    { code: "Technical Issue",    description: "Platform crashes, connectivity, or audio/video problems",     example: "Poor internet, platform crashes, audio problems." },
+    { code: "Social Isolation",   description: "Feelings of disconnection, loneliness, or missed networking", example: "I feel isolated. College was supposed to be about making connections." },
+    { code: "Engagement",         description: "Motivation, participation quality, or peer interaction",      example: "I've connected with more diverse perspectives online." },
+    { code: "Flexibility",        description: "Appreciation for self-paced or asynchronous learning",       example: "I can study at my own pace and revisit lectures." },
+  ],
+  exit_interviews: [
+    { code: "Compensation",       description: "Salary, benefits, or financial dissatisfaction",              example: "I was underpaid compared to market rates." },
+    { code: "Career Growth",      description: "Lack of advancement opportunities or development",            example: "There was no clear path to promotion." },
+    { code: "Management",         description: "Poor leadership, micromanagement, or communication issues",   example: "My manager micromanaged everything." },
+    { code: "Work-Life Balance",  description: "Excessive hours or difficulty separating work and life",      example: "I was expected to be available 24/7." },
+    { code: "Culture",            description: "Workplace environment, values, or team dynamics",             example: "The culture felt toxic and political." },
+    { code: "Relocation",         description: "Geographic or commute-related reasons for leaving",           example: "I'm moving to another city." },
+  ],
+  mixed_feedback: [
+    { code: "Positive",   description: "Overall favorable impressions or praise",              example: "Really impressive work overall." },
+    { code: "Negative",   description: "Unfavorable impressions or complaints",                example: "Very disappointing outcome." },
+    { code: "Neutral",    description: "Balanced or uncommitted responses",                    example: "It was fine, nothing special." },
+    { code: "Detailed",   description: "Feedback with specific reasoning or examples",         example: "The third chapter particularly stood out because..." },
+    { code: "Brief",      description: "Short responses without elaboration",                  example: "Good job." },
+  ],
+};
+
+const SAMPLE_PROMPTS: Record<string, string> = {
+  product_reviews: `Analyze this product review and assign all applicable qualitative codes from the codebook.
+
+- Apply every code that is clearly present in the review
+- A review may have multiple codes (e.g. both Positive and Shipping / Packaging)
+- Return ONLY the code labels, comma-separated
+- If no codes apply, return "Uncoded"
+
+Respond with ONLY the comma-separated codes. Nothing else.`,
+
+  healthcare_interviews: `Analyze this healthcare worker interview excerpt and assign qualitative codes.
+
+- Apply all codes from the codebook that are present — responses often contain multiple themes
+- Return ONLY the code labels, comma-separated (e.g. "Burnout, Team Support")
+- If no codes apply, return "Uncoded"
+
+Respond with ONLY the comma-separated codes. Nothing else.`,
+
+  support_tickets: `Classify this customer support ticket using the codebook.
+
+- A ticket may match multiple codes (e.g. a billing issue that is also blocking)
+- Return ONLY the code labels, comma-separated (e.g. "Bug Report, Critical / Blocking")
+- If no codes apply, return "Uncoded"
+
+Respond with ONLY the comma-separated codes. Nothing else.`,
+
+  learning_experience: `Analyze this student response about online learning and assign qualitative codes.
+
+- Apply all codes that are clearly expressed — responses often span multiple themes
+- Return ONLY the code labels, comma-separated (e.g. "Positive Experience, Flexibility")
+- If no codes apply, return "Uncoded"
+
+Respond with ONLY the comma-separated codes. Nothing else.`,
+
+  exit_interviews: `Analyze this employee exit interview response and assign qualitative codes.
+
+- Apply all codes from the codebook that are present in the response
+- Return ONLY the code labels, comma-separated (e.g. "Compensation, Career Growth")
+- If no codes apply, return "Uncoded"
+
+Respond with ONLY the comma-separated codes. Nothing else.`,
+
+  mixed_feedback: `Classify this feedback using the codebook.
+
+- Apply the most fitting codes — a response may be both Positive and Detailed, etc.
+- Return ONLY the code labels, comma-separated
+- If no codes apply, return "Uncoded"
+
+Respond with ONLY the comma-separated codes. Nothing else.`,
+};
+
 const EXAMPLE_PROMPTS: Record<string, string> = {
   "Sentiment (Positive/Negative/Neutral)": "Classify the sentiment as Positive, Negative, or Neutral. Return only the label.",
   "Theme identification": "Identify themes in this text excerpt. Return comma-separated theme names.",
@@ -36,11 +146,62 @@ const EXAMPLE_PROMPTS: Record<string, string> = {
   "Burnout/Resilience coding": "Code this interview excerpt for: Burnout, Resilience, Team Support, Resource Issue, Leadership, or Work-Life Balance. Return all applicable codes, comma-separated.",
 };
 
+function parseCSVLine(line: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else { current += ch; }
+    } else {
+      if (ch === '"') { inQuotes = true; }
+      else if (ch === ',') { result.push(current); current = ""; }
+      else { current += ch; }
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+function buildPrompt(systemPrompt: string, codebook: CodeEntry[], inject: boolean): string {
+  if (!inject || codebook.length === 0) return systemPrompt;
+  const validCodes = codebook.filter((e) => e.code.trim());
+  if (validCodes.length === 0) return systemPrompt;
+  const lines = [
+    "",
+    "---",
+    "CODEBOOK:",
+    ...validCodes.map((e, i) =>
+      `${i + 1}. ${e.code}${e.description ? ` — ${e.description}` : ""}${e.example ? `\n   Example: "${e.example}"` : ""}`
+    ),
+    "---",
+  ];
+  return systemPrompt.trimEnd() + "\n" + lines.join("\n");
+}
+
 export default function QualitativeCoderPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
   const [selectedCols, setSelectedCols] = useState<string[]>([]);
-  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_PROMPT);
+  const [systemPrompt, setSystemPrompt] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem(PROMPT_KEY) || DEFAULT_PROMPT;
+    }
+    return DEFAULT_PROMPT;
+  });
+  const [codebook, setCodebook] = useState<CodeEntry[]>(() => {
+    if (typeof window !== "undefined") {
+      try { return JSON.parse(localStorage.getItem(CODEBOOK_KEY) || "[]"); } catch { return []; }
+    }
+    return [];
+  });
+  const [injectCodebook, setInjectCodebook] = useState(false);
+
+  const csvImportRef = useRef<HTMLInputElement>(null);
+
   const [isProcessing, setIsProcessing] = useState(false);
   const [runMode, setRunMode] = useState<RunMode>("full");
   const [progress, setProgress] = useState({ completed: 0, total: 0, success: 0, errors: 0 });
@@ -49,8 +210,19 @@ export default function QualitativeCoderPage() {
   const [runId, setRunId] = useState<string | null>(null);
   const [concurrency, setConcurrency] = useState(5);
 
+  const abortRef = useRef(false);
+  const startedAtRef = useRef<number>(0);
+
   const provider = useActiveModel();
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
+
+  useEffect(() => {
+    localStorage.setItem(PROMPT_KEY, systemPrompt);
+  }, [systemPrompt]);
+
+  useEffect(() => {
+    localStorage.setItem(CODEBOOK_KEY, JSON.stringify(codebook));
+  }, [codebook]);
 
   const handleDataLoaded = (newData: Row[], name: string) => {
     setData(newData);
@@ -63,7 +235,15 @@ export default function QualitativeCoderPage() {
 
   const loadSample = (key: string) => {
     const s = SAMPLE_DATASETS[key];
-    if (s) handleDataLoaded(s.data as Row[], s.name);
+    if (!s) return;
+    handleDataLoaded(s.data as Row[], s.name);
+    const cb = SAMPLE_CODEBOOKS[key];
+    if (cb) {
+      setCodebook(cb.map((e) => ({ ...e, id: crypto.randomUUID() })));
+      setInjectCodebook(true);
+    }
+    const sp = SAMPLE_PROMPTS[key];
+    if (sp) setSystemPrompt(sp);
   };
 
   const toggleCol = (col: string) =>
@@ -71,6 +251,58 @@ export default function QualitativeCoderPage() {
 
   const toggleAll = () =>
     setSelectedCols(selectedCols.length === allColumns.length ? [] : [...allColumns]);
+
+  const addCode = () =>
+    setCodebook((prev) => [...prev, { id: crypto.randomUUID(), code: "", description: "", example: "" }]);
+
+  const updateCode = (id: string, field: keyof CodeEntry, value: string) =>
+    setCodebook((prev) => prev.map((e) => e.id === id ? { ...e, [field]: value } : e));
+
+  const deleteCode = (id: string) =>
+    setCodebook((prev) => prev.filter((e) => e.id !== id));
+
+  const importCodebookCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      if (lines.length < 2) { toast.error("CSV must have a header row and at least one data row"); return; }
+      const headers = parseCSVLine(lines[0]).map((h) => h.trim().toLowerCase());
+      const codeIdx = headers.indexOf("code");
+      const descIdx = headers.indexOf("description");
+      const exIdx   = headers.indexOf("example");
+      if (codeIdx === -1) { toast.error("CSV must have a 'code' column"); return; }
+      const entries: CodeEntry[] = lines.slice(1).map((line) => {
+        const cols = parseCSVLine(line);
+        return {
+          id: crypto.randomUUID(),
+          code: (cols[codeIdx] ?? "").trim(),
+          description: descIdx !== -1 ? (cols[descIdx] ?? "").trim() : "",
+          example: exIdx !== -1 ? (cols[exIdx] ?? "").trim() : "",
+        };
+      }).filter((entry) => entry.code.length > 0);
+      setCodebook(entries);
+      toast.success(`Imported ${entries.length} codes`);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const exportCodebookCSV = () => {
+    if (codebook.length === 0) { toast.error("Codebook is empty"); return; }
+    const rows = [
+      "code,description,example",
+      ...codebook.map((e) =>
+        [`"${e.code.replace(/"/g, '""')}"`, `"${e.description.replace(/"/g, '""')}"`, `"${e.example.replace(/"/g, '""')}"`].join(",")
+      ),
+    ].join("\n");
+    const blob = new Blob(["\uFEFF" + rows], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "codebook.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const runCoding = async (mode: RunMode) => {
     if (data.length === 0) return toast.error("No data loaded");
@@ -83,6 +315,8 @@ export default function QualitativeCoderPage() {
       mode === "test"    ? data.slice(0, 10) :
       data;
 
+    abortRef.current = false;
+    startedAtRef.current = Date.now();
     setRunId(null);
     setIsProcessing(true);
     setRunMode(mode);
@@ -99,7 +333,7 @@ export default function QualitativeCoderPage() {
       const runRes = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runType: "qualitative-coder", provider: provider.providerId, model: provider.defaultModel, temperature: 0, systemPrompt, inputFile: dataName || "unnamed", inputRows: targetData.length }),
+        body: JSON.stringify({ runType: "qualitative-coder", provider: provider.providerId, model: provider.defaultModel, temperature: 0, systemPrompt: buildPrompt(systemPrompt, codebook, injectCodebook), inputFile: dataName || "unnamed", inputRows: targetData.length }),
       });
       const rd = await runRes.json();
       localRunId = rd.id ?? null;
@@ -107,6 +341,7 @@ export default function QualitativeCoderPage() {
 
     const tasks = targetData.map((row, idx) =>
       limit(async () => {
+        if (abortRef.current) return;
         const t0 = Date.now();
         try {
           const subset: Row = {};
@@ -114,7 +349,7 @@ export default function QualitativeCoderPage() {
           const res = await fetch("/api/process-row", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider: provider.providerId, model: provider.defaultModel, apiKey: provider.apiKey || "local", baseUrl: provider.baseUrl, systemPrompt, userContent: JSON.stringify(subset), rowIdx: idx, temperature: 0 }),
+            body: JSON.stringify({ provider: provider.providerId, model: provider.defaultModel, apiKey: provider.apiKey || "local", baseUrl: provider.baseUrl, systemPrompt: buildPrompt(systemPrompt, codebook, injectCodebook), userContent: JSON.stringify(subset), rowIdx: idx, temperature: 0 }),
           });
           const result = await res.json();
           if (result.error) throw new Error(result.error);
@@ -151,13 +386,24 @@ export default function QualitativeCoderPage() {
     if (!results.length) return;
     const headers = Object.keys(results[0]);
     const csv = [headers.join(","), ...results.map((r) => headers.map((h) => `"${String(r[h] ?? "").replace(/"/g, '""')}"`).join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = `qualitative_coded_${dataName || "data"}.csv`; a.click();
     URL.revokeObjectURL(url);
   };
 
   const progressPct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+
+  const etaStr = (() => {
+    if (!isProcessing || progress.completed === 0 || startedAtRef.current === 0) return "";
+    const elapsedMs = Date.now() - startedAtRef.current;
+    const avgMsPerRow = elapsedMs / progress.completed;
+    const etaMs = avgMsPerRow * (progress.total - progress.completed);
+    if (etaMs > 5000) {
+      return etaMs < 60000 ? `~${Math.round(etaMs / 1000)}s left` : `~${Math.floor(etaMs / 60000)}m left`;
+    }
+    return "";
+  })();
 
   return (
     <div className="max-w-4xl mx-auto space-y-0 pb-16">
@@ -171,8 +417,47 @@ export default function QualitativeCoderPage() {
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
-        <FileUploader onDataLoaded={handleDataLoaded} />
-        <SampleDatasetPicker onSelect={loadSample} />
+
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_260px] gap-4 items-stretch">
+          {/* Left: file uploader */}
+          <FileUploader onDataLoaded={handleDataLoaded} />
+
+          {/* Right: sample dataset cards */}
+          <div className="border rounded-xl overflow-hidden flex flex-col">
+            <div className="px-3 py-2 bg-muted/30 border-b text-[11px] font-semibold text-muted-foreground tracking-wide uppercase">
+              Sample Datasets
+            </div>
+            <div className="divide-y flex-1 overflow-y-auto">
+              {Object.entries(SAMPLE_DATASETS).map(([key, ds]) => {
+                const isLoaded = dataName === ds.name;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => loadSample(key)}
+                    className={`w-full text-left px-3 py-2.5 transition-colors hover:bg-muted/40 ${isLoaded ? "bg-green-50 dark:bg-green-950/20" : ""}`}
+                  >
+                    <div className="flex items-start justify-between gap-1.5">
+                      <div className="min-w-0">
+                        <div className={`text-sm font-medium truncate ${isLoaded ? "text-green-700 dark:text-green-300" : ""}`}>
+                          {ds.name}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground mt-0.5 leading-snug line-clamp-2">
+                          {ds.description}
+                        </div>
+                      </div>
+                      {isLoaded && (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0 mt-0.5" />
+                      )}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground/70 mt-1">
+                      {ds.data.length} rows{SAMPLE_CODEBOOKS[key] ? " · codebook included" : ""}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
 
         {data.length > 0 && (
           <>
@@ -227,9 +512,136 @@ export default function QualitativeCoderPage() {
 
       <div className="border-t" />
 
-      {/* ── 3. Coding Instructions ────────────────────────────────────────── */}
+      {/* ── 3. Codebook ───────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
-        <h2 className="text-2xl font-bold">3. Coding Instructions</h2>
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h2 className="text-2xl font-bold">3. Codebook</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Define your codes. Toggle &ldquo;Inject into prompt&rdquo; to append the codebook to the AI instructions automatically.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              ref={csvImportRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={importCodebookCSV}
+            />
+            <Button variant="outline" size="sm" onClick={() => csvImportRef.current?.click()}>
+              <Upload className="h-3.5 w-3.5 mr-1.5" />Import CSV
+            </Button>
+            <Button variant="outline" size="sm" disabled={codebook.length === 0} onClick={exportCodebookCSV}>
+              <Download className="h-3.5 w-3.5 mr-1.5" />Export CSV
+            </Button>
+          </div>
+        </div>
+
+        {/* Inline-editable table */}
+        <div className="border rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b bg-muted/20">
+                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[22%]">Code</th>
+                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[38%]">Description</th>
+                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[34%]">Example</th>
+                <th className="px-2 py-2 w-8" />
+              </tr>
+            </thead>
+            <tbody>
+              {codebook.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="text-center py-10 text-xs text-muted-foreground italic">
+                    No codes yet — click &ldquo;Add Code&rdquo; below or import a CSV file.
+                  </td>
+                </tr>
+              ) : (
+                codebook.map((entry) => (
+                  <tr key={entry.id} className="border-b last:border-0 hover:bg-muted/10 transition-colors">
+                    <td className="px-2 py-1.5">
+                      <Input
+                        value={entry.code}
+                        onChange={(e) => updateCode(entry.id, "code", e.target.value)}
+                        placeholder="Code label"
+                        className="h-7 text-sm font-medium border-0 shadow-none bg-transparent focus-visible:ring-1 px-1"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Input
+                        value={entry.description}
+                        onChange={(e) => updateCode(entry.id, "description", e.target.value)}
+                        placeholder="What this code means…"
+                        className="h-7 text-sm border-0 shadow-none bg-transparent focus-visible:ring-1 px-1"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Input
+                        value={entry.example}
+                        onChange={(e) => updateCode(entry.id, "example", e.target.value)}
+                        placeholder="e.g. an illustrative quote"
+                        className="h-7 text-sm border-0 shadow-none bg-transparent focus-visible:ring-1 px-1"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      <button
+                        onClick={() => deleteCode(entry.id)}
+                        className="text-muted-foreground hover:text-destructive transition-colors p-0.5"
+                        aria-label="Delete code"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+          <div className="px-3 py-2 border-t bg-muted/5">
+            <button
+              onClick={addCode}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" /> Add Code
+            </button>
+          </div>
+        </div>
+
+        {/* Inject toggle */}
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Switch id="inject-codebook" size="sm" checked={injectCodebook} onCheckedChange={setInjectCodebook} />
+            <Label htmlFor="inject-codebook" className="text-sm cursor-pointer">Inject into prompt</Label>
+            {injectCodebook && codebook.filter((e) => e.code.trim()).length > 0 && (
+              <span className="text-xs text-violet-600 bg-violet-50 dark:bg-violet-950/20 border border-violet-200 dark:border-violet-800 px-2 py-0.5 rounded">
+                {codebook.filter((e) => e.code.trim()).length} code{codebook.filter((e) => e.code.trim()).length !== 1 ? "s" : ""} will be appended
+              </span>
+            )}
+            {injectCodebook && codebook.filter((e) => e.code.trim()).length === 0 && (
+              <span className="text-xs text-amber-600">No codes defined yet — add codes above</span>
+            )}
+          </div>
+
+          {injectCodebook && codebook.filter((e) => e.code.trim()).length > 0 && (
+            <details className="group">
+              <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground list-none flex items-center gap-1 select-none w-fit">
+                <span className="group-open:hidden">▶</span>
+                <span className="hidden group-open:inline">▼</span>
+                Preview injected prompt
+              </summary>
+              <pre className="mt-2 text-[11px] font-mono bg-muted/20 border rounded p-3 whitespace-pre-wrap leading-relaxed max-h-64 overflow-y-auto">
+                {buildPrompt(systemPrompt, codebook, true)}
+              </pre>
+            </details>
+          )}
+        </div>
+      </div>
+
+      <div className="border-t" />
+
+      {/* ── 4. Coding Instructions ────────────────────────────────────────── */}
+      <div className="space-y-4 py-8">
+        <h2 className="text-2xl font-bold">4. Coding Instructions</h2>
 
         <div className="space-y-3">
           <div className="flex items-center justify-between">
@@ -255,6 +667,12 @@ export default function QualitativeCoderPage() {
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
           />
+          {systemPrompt !== DEFAULT_PROMPT && (
+            <button onClick={() => setSystemPrompt(DEFAULT_PROMPT)}
+              className="text-[11px] text-muted-foreground underline hover:text-foreground">
+              Reset to default
+            </button>
+          )}
           <p className="text-[11px] text-muted-foreground">
             The AI processes each row individually using these instructions.
           </p>
@@ -272,9 +690,9 @@ export default function QualitativeCoderPage() {
 
       <div className="border-t" />
 
-      {/* ── 4. Execute ────────────────────────────────────────────────────── */}
+      {/* ── 5. Execute ────────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
-        <h2 className="text-2xl font-bold">4. Execute</h2>
+        <h2 className="text-2xl font-bold">5. Execute</h2>
 
         {isProcessing && (
           <div className="space-y-2">
@@ -282,8 +700,15 @@ export default function QualitativeCoderPage() {
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 {runMode !== "full" ? (runMode === "preview" ? "Preview" : "Test") + " run" : "Full run"} — coding {progress.total} rows…
+                {etaStr && <span className="ml-1">{etaStr}</span>}
               </span>
-              <span>{progress.completed} / {progress.total}</span>
+              <div className="flex items-center gap-2">
+                <span>{progress.completed} / {progress.total}</span>
+                <Button variant="outline" size="sm" onClick={() => { abortRef.current = true; }}
+                  className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                  Stop
+                </Button>
+              </div>
             </div>
             <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
               <div className="bg-violet-500 h-full transition-all duration-300" style={{ width: `${progressPct}%` }} />
@@ -303,7 +728,7 @@ export default function QualitativeCoderPage() {
           <span className="text-xs">(parallel API calls)</span>
         </div>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"
             disabled={data.length === 0 || isProcessing || !provider || !systemPrompt.trim() || selectedCols.length === 0}
             onClick={() => runCoding("preview")}>
