@@ -66,4 +66,41 @@ describe('withRetry', () => {
     expect(await promise).toBe('third time lucky');
     expect(fn).toHaveBeenCalledTimes(3);
   });
+
+  it('does not retry on 401 auth errors', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('401 Unauthorized'));
+    const promise = withRetry(fn, { maxAttempts: 3, baseDelayMs: 10 });
+    const check = expect(promise).rejects.toThrow('401 Unauthorized');
+    await vi.runAllTimersAsync();
+    await check;
+    expect(fn).toHaveBeenCalledTimes(1); // no retry
+  });
+
+  it('does not retry on invalid_api_key errors', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('invalid_api_key: The API key provided is invalid'));
+    const promise = withRetry(fn, { maxAttempts: 3, baseDelayMs: 10 });
+    const check = expect(promise).rejects.toThrow('invalid_api_key');
+    await vi.runAllTimersAsync();
+    await check;
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry on authentication errors', async () => {
+    const fn = vi.fn().mockRejectedValue(new Error('authentication failed'));
+    const promise = withRetry(fn, { maxAttempts: 3, baseDelayMs: 10 });
+    const check = expect(promise).rejects.toThrow('authentication failed');
+    await vi.runAllTimersAsync();
+    await check;
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does retry on network errors (retryable)', async () => {
+    const fn = vi.fn()
+      .mockRejectedValueOnce(new Error('ECONNRESET'))
+      .mockResolvedValue('ok');
+    const promise = withRetry(fn, { maxAttempts: 3, baseDelayMs: 10 });
+    await vi.runAllTimersAsync();
+    expect(await promise).toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
 });

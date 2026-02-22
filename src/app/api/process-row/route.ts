@@ -45,17 +45,22 @@ export async function POST(req: NextRequest) {
     );
     const duration = (Date.now() - startTime) / 1000;
 
+    // Log to DB separately — a logging failure must never mask a successful LLM result
     if (runId) {
-      await prisma.runResult.create({
-        data: {
-          runId,
-          rowIndex: rowIdx ?? 0,
-          inputJson: JSON.stringify({ content: userContent }),
-          output: outputText,
-          status: "SUCCESS",
-          latency: duration,
-        },
-      });
+      try {
+        await prisma.runResult.create({
+          data: {
+            runId,
+            rowIndex: rowIdx ?? 0,
+            inputJson: JSON.stringify({ content: userContent }),
+            output: outputText,
+            status: "SUCCESS",
+            latency: duration,
+          },
+        });
+      } catch (dbErr) {
+        console.error("process-row: DB log failed (result still returned):", dbErr);
+      }
     }
 
     return NextResponse.json({ output: outputText, latency: duration });

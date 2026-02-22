@@ -50,7 +50,20 @@ export async function POST(req: NextRequest) {
       };
     });
 
-    const workerResults = await Promise.all(workerPromises);
+    const workerSettled = await Promise.allSettled(workerPromises);
+    const workerResults = workerSettled
+      .filter((r): r is PromiseFulfilledResult<{ id: string; output: string; latency: number }> => r.status === "fulfilled")
+      .map((r) => r.value);
+
+    if (workerResults.length < 2) {
+      const errors = workerSettled
+        .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+        .map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason)));
+      return NextResponse.json(
+        { error: `Not enough workers succeeded (${workerResults.length}/${workers.length}). Errors: ${errors.join("; ")}` },
+        { status: 502 }
+      );
+    }
 
     // Step 2: Inter-rater analytics on single-token outputs
     const outputs = workerResults.map((r) => r.output.trim());

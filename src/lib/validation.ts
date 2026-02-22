@@ -19,7 +19,7 @@ const ProviderFieldsLocal = z.object({
 export const ProcessRowSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
-  apiKey: z.string().min(1),
+  apiKey: z.string().default(""), // empty string is valid for local providers (Ollama, LM Studio)
   baseUrl: z.string().optional(),
   systemPrompt: z.string(),
   userContent: z.string(),
@@ -49,7 +49,7 @@ export const ComparisonRowSchema = z.object({
       id: z.string(),
       provider: z.string().min(1),
       model: z.string().min(1),
-      apiKey: z.string().min(1),
+      apiKey: z.string().default(""), // local providers may omit
       baseUrl: z.string().optional(),
     })
   ).min(2),
@@ -77,7 +77,7 @@ export const AutomatorRowSchema = z.object({
   ).min(1),
   provider: z.string().min(1),
   model: z.string().min(1),
-  apiKey: z.string().min(1),
+  apiKey: z.string().default(""), // local providers may omit
   baseUrl: z.string().optional(),
 });
 
@@ -85,7 +85,7 @@ export const AutomatorRowSchema = z.object({
 export const GenerateRowSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
-  apiKey: z.string().min(1),
+  apiKey: z.string().default(""), // local providers may omit
   baseUrl: z.string().optional(),
   systemPrompt: z.string().optional(),
   rowCount: z.number().int().min(1).max(500),
@@ -107,7 +107,7 @@ export const DocumentExtractSchema = z.object({
   fileName: z.string().optional(),
   provider: z.string().min(1),
   model: z.string().min(1),
-  apiKey: z.string().min(1),
+  apiKey: z.string().default(""), // local providers may omit
   baseUrl: z.string().optional(),
   systemPrompt: z.string().optional(),
 });

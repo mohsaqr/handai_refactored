@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Handai",
+  "version": "0.1.0",
+  "identifier": "me.saqr.handai",
+  "build": {
+    "beforeDevCommand": "cd ../../../ && npm run dev",
+    "devUrl": "http://127.0.0.1:3000",
+    "beforeBuildCommand": "cd ../../../ && npm run build",
+    "frontendDist": "../../../.next/standalone"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [],
+    "externalBin": [
+      "binaries/node"
+    ],
+    "resources": {
+      "../../../.next/standalone": "nextjs",
+      "../../../.next/static": "nextjs/.next/static",
+      "../../../public": "nextjs/public"
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Handai AI Data Suite",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "url": "about:blank",
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

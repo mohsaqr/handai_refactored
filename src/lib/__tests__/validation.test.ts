@@ -22,9 +22,15 @@ describe('ProcessRowSchema', () => {
     expect(ProcessRowSchema.safeParse(valid).success).toBe(true);
   });
 
-  it('rejects missing apiKey', () => {
+  it('defaults missing apiKey to empty string (local providers)', () => {
     const { apiKey: _k, ...rest } = valid;
-    expect(ProcessRowSchema.safeParse(rest).success).toBe(false);
+    const result = ProcessRowSchema.safeParse(rest);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.apiKey).toBe("");
+  });
+
+  it('accepts empty apiKey for local providers', () => {
+    expect(ProcessRowSchema.safeParse({ ...valid, apiKey: "" }).success).toBe(true);
   });
 
   it('rejects temperature above 2', () => {
