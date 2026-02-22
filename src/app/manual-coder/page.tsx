@@ -133,7 +133,7 @@ function loadSettings(): MCSettings {
 function saveSettings(s: MCSettings) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
 
 // ─── Export ─────────────────────────────────────────────────────────────────
-function exportMC(data: Row[], codes: string[], codingData: Record<number, string[]>, mode: "standard" | "onehot", dataName: string) {
+async function exportMC(data: Row[], codes: string[], codingData: Record<number, string[]>, mode: "standard" | "onehot", dataName: string) {
   const base = dataName.replace(/\.[^.]+$/, "") || "session";
   if (mode === "standard") {
     const rows = data.map((row, i) => ({ ...row, codes: (codingData[i] || []).join("; ") }));
@@ -683,10 +683,10 @@ export default function ManualCoderPage() {
           <Button size="sm" variant="outline" onClick={() => setShowTable((v) => !v)}>
             <Table2 className="h-3.5 w-3.5 mr-1" /> Table
           </Button>
-          <Button size="sm" variant="outline" onClick={() => exportMC(data, codes, codingData, "standard", dataName)} title="Export standard CSV">
+          <Button size="sm" variant="outline" onClick={() => { void exportMC(data, codes, codingData, "standard", dataName); }} title="Export standard CSV">
             <Download className="h-3.5 w-3.5 mr-1" /> CSV
           </Button>
-          <Button size="sm" variant="outline" onClick={() => exportMC(data, codes, codingData, "onehot", dataName)} title="One-hot encoding">
+          <Button size="sm" variant="outline" onClick={() => { void exportMC(data, codes, codingData, "onehot", dataName); }} title="One-hot encoding">
             1/0
           </Button>
           <Button size="sm" variant="ghost" onClick={() => { setData([]); setCodingData({}); }} title="Close session">
@@ -956,10 +956,10 @@ export default function ManualCoderPage() {
             <p className="text-sm text-muted-foreground">Code some rows before exporting</p>
           ) : (
             <div className="flex gap-3">
-              <Button variant="outline" onClick={() => exportMC(data, codes, codingData, "standard", dataName)}>
+              <Button variant="outline" onClick={() => { void exportMC(data, codes, codingData, "standard", dataName); }}>
                 <Download className="h-4 w-4 mr-2" /> Export CSV (standard)
               </Button>
-              <Button variant="outline" onClick={() => exportMC(data, codes, codingData, "onehot", dataName)}>
+              <Button variant="outline" onClick={() => { void exportMC(data, codes, codingData, "onehot", dataName); }}>
                 <Download className="h-4 w-4 mr-2" /> Export CSV (one-hot)
               </Button>
             </div>

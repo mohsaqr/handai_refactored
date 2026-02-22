@@ -389,7 +389,7 @@ export default function QualitativeCoderPage() {
 
   const handleExport = () => {
     if (!results.length) return;
-    downloadCSV(results as Record<string, unknown>[], `qualitative_coded_${dataName || "data"}.csv`);
+    void downloadCSV(results as Record<string, unknown>[], `qualitative_coded_${dataName || "data"}.csv`);
   };
 
   const progressPct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;

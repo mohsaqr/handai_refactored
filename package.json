@@ -17,6 +17,7 @@
     "@ai-sdk/groq": "^3.0.24",
     "@ai-sdk/openai": "^3.0.30",
     "@prisma/client": "^6.19.2",
+    "@tauri-apps/api": "^2.10.1",
     "@types/papaparse": "^5.5.2",
     "@types/react-dropzone": "^4.2.2",
     "ai": "^6.0.97",

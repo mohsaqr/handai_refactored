@@ -258,7 +258,7 @@ export default function ConsensusCoderPage() {
 
   const handleExport = () => {
     if (results.length === 0) return;
-    downloadCSV(results as Record<string, unknown>[], `consensus_results_${dataName || Date.now()}.csv`);
+    void downloadCSV(results as Record<string, unknown>[], `consensus_results_${dataName || Date.now()}.csv`);
   };
 
   const progressPct = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;

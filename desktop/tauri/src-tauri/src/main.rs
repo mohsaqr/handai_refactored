@@ -15,6 +15,7 @@
 
 use std::{net::TcpStream, sync::Mutex, thread, time::Duration};
 use tauri::{Manager, State};
+use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_shell::process::CommandChild;
 
 // Only needed in production builds (sidecar is not spawned in dev)
@@ -49,10 +50,34 @@ fn get_server_url() -> String {
     format!("http://127.0.0.1:{PORT}")
 }
 
+/// Show a native save-file dialog and write CSV content to the chosen path.
+/// WKWebView (macOS) does not support the HTML `download` attribute, so the
+/// web layer detects Tauri and calls this command instead.
+/// Returns `true` if saved, `false` if the user cancelled.
+#[tauri::command]
+async fn save_file(app: tauri::AppHandle, filename: String, content: String) -> Result<bool, String> {
+    let path = app
+        .dialog()
+        .file()
+        .set_file_name(&filename)
+        .add_filter("CSV Files", &["csv"])
+        .blocking_save_file();
+
+    match path {
+        Some(FilePath::Path(p)) => {
+            std::fs::write(&p, content.as_bytes()).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        Some(_) => Err("Unsupported path type".into()),
+        None => Ok(false), // user cancelled
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(ServerState(Mutex::new(None)))
         .setup(|_app| {
             // In production builds only: spawn the Next.js standalone server
@@ -107,11 +132,8 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 // Kill the sidecar when the window closes.
-                // Extract child before the if-let to satisfy borrow checker
-                // (MutexGuard must drop before end-of-block).
                 let child = {
                     let state: State<ServerState> = window.state();
-                    // Let x bind the value so the MutexGuard drops before `state`
                     let x = state.0.lock().unwrap().take();
                     x
                 };
@@ -120,7 +142,7 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![get_server_url])
+        .invoke_handler(tauri::generate_handler![get_server_url, save_file])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
 }

@@ -1,9 +1,12 @@
 /**
  * Shared CSV download utility.
- * Builds a UTF-8 BOM CSV from an array of plain objects and triggers a
- * browser download. All values are double-quote escaped.
+ *
+ * In a browser: builds a blob URL and triggers an anchor-click download.
+ * In Tauri (WKWebView): the HTML `download` attribute is not supported, so
+ * we detect Tauri via `window.__TAURI_INTERNALS__` and invoke the native
+ * `save_file` command which shows a system save-file dialog.
  */
-export function downloadCSV(rows: Record<string, unknown>[], filename: string): void {
+export async function downloadCSV(rows: Record<string, unknown>[], filename: string): Promise<void> {
   if (!rows.length) return;
   const headers = Object.keys(rows[0]);
   const csv = [
@@ -14,7 +17,18 @@ export function downloadCSV(rows: Record<string, unknown>[], filename: string): 
         .join(",")
     ),
   ].join("\n");
-  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const content = "\uFEFF" + csv;
+
+  // Tauri WebView (WKWebView on macOS) does not support the HTML download
+  // attribute — use the native save-file dialog via a Tauri command instead.
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("save_file", { filename, content });
+    return;
+  }
+
+  // Browser: standard blob URL download
+  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

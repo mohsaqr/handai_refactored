@@ -139,7 +139,7 @@ function loadSettings(): AICSettings {
 
 function saveSettings(s: AICSettings) { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
 
-function exportCSV(
+async function exportCSV(
   data: Row[],
   codes: string[],
   codingData: Record<number, string[]>,
@@ -787,11 +787,11 @@ Only use codes from the list. Confidence 0.0–1.0.`,
         {/* Export from analytics */}
         {codedCount > 0 && (
           <div className="flex gap-3 flex-wrap border rounded-lg p-4">
-            <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "standard", dataName)}>
+            <Button variant="outline" onClick={() => { void exportCSV(data, codes, codingData, aiData, "standard", dataName); }}>
               <Download className="h-4 w-4 mr-2" /> Export Human Codes
             </Button>
             {aiCount > 0 && (
-              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "withAI", dataName)}>
+              <Button variant="outline" onClick={() => { void exportCSV(data, codes, codingData, aiData, "withAI", dataName); }}>
                 <Download className="h-4 w-4 mr-2" /> Export with AI
               </Button>
             )}
@@ -1257,14 +1257,14 @@ Only use codes from the list. Confidence 0.0–1.0.`,
             <p className="text-sm text-muted-foreground">Code some rows before exporting</p>
           ) : (
             <div className="flex flex-wrap gap-3">
-              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "standard", dataName)}>
+              <Button variant="outline" onClick={() => { void exportCSV(data, codes, codingData, aiData, "standard", dataName); }}>
                 <Download className="h-4 w-4 mr-2" /> CSV (standard)
               </Button>
-              <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "onehot", dataName)}>
+              <Button variant="outline" onClick={() => { void exportCSV(data, codes, codingData, aiData, "onehot", dataName); }}>
                 <Download className="h-4 w-4 mr-2" /> CSV (one-hot)
               </Button>
               {aiCount > 0 && (
-                <Button variant="outline" onClick={() => exportCSV(data, codes, codingData, aiData, "withAI", dataName)}>
+                <Button variant="outline" onClick={() => { void exportCSV(data, codes, codingData, aiData, "withAI", dataName); }}>
                   <Download className="h-4 w-4 mr-2" /> CSV (with AI comparison)
                 </Button>
               )}
