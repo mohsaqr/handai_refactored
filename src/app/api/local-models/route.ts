@@ -1,4 +1,3 @@
-export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 
 async function tryFetch(url: string): Promise<Response | null> {
