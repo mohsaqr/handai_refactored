@@ -4,23 +4,21 @@
   "version": "0.1.0",
   "identifier": "me.saqr.handai",
   "build": {
-    "beforeDevCommand": "cd ../../../ && npm run dev",
+    "beforeDevCommand": "cd ../.. && npm run dev || true",
     "devUrl": "http://127.0.0.1:3000",
-    "beforeBuildCommand": "cd ../../../ && npm run build",
-    "frontendDist": "../../../.next/standalone"
+    "beforeBuildCommand": "cd ../.. && npm run build:tauri",
+    "frontendDist": "../../../out"
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": [],
-    "externalBin": [
-      "binaries/node"
-    ],
-    "resources": {
-      "../../../.next/standalone": "nextjs",
-      "../../../.next/static": "nextjs/.next/static",
-      "../../../public": "nextjs/public"
-    }
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   },
   "app": {
     "windows": [
@@ -31,7 +29,6 @@
         "height": 900,
         "minWidth": 900,
         "minHeight": 600,
-        "url": "about:blank",
         "decorations": true
       }
     ],

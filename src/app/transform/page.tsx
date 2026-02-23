@@ -13,6 +13,8 @@ import pLimit from "p-limit";
 import Link from "next/link";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { SampleDatasetPicker } from "@/components/tools/SampleDatasetPicker";
+import { processRowDirect } from "@/lib/llm-browser";
+import { createRun, saveResults } from "@/lib/db-tauri";
 
 type Row = Record<string, unknown>;
 type RunMode = "preview" | "test" | "full";
@@ -28,6 +30,8 @@ const EXAMPLE_PROMPTS: Record<string, string> = {
   "Keyword extraction": "Extract the 3 most important keywords. Return as comma-separated values.",
   "Language detection": "Detect the language of the text. Return the language name only.",
 };
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export default function TransformPage() {
   const [data, setData] = useState<Row[]>([]);
@@ -108,10 +112,8 @@ export default function TransformPage() {
 
     let localRunId: string | null = null;
     try {
-      const runRes = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (isTauri) {
+        const rd = await createRun({
           runType: "transform",
           provider: activeModel.providerId,
           model: activeModel.defaultModel,
@@ -119,10 +121,25 @@ export default function TransformPage() {
           systemPrompt,
           inputFile: dataName || "unnamed",
           inputRows: targetData.length,
-        }),
-      });
-      const rd = await runRes.json();
-      localRunId = rd.id ?? null;
+        });
+        localRunId = rd.id ?? null;
+      } else {
+        const runRes = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runType: "transform",
+            provider: activeModel.providerId,
+            model: activeModel.defaultModel,
+            temperature: 0,
+            systemPrompt,
+            inputFile: dataName || "unnamed",
+            inputRows: targetData.length,
+          }),
+        });
+        const rd = await runRes.json();
+        localRunId = rd.id ?? null;
+      }
     } catch { /* non-fatal */ }
 
     const tasks = targetData.map((row, idx) =>
@@ -132,22 +149,36 @@ export default function TransformPage() {
         try {
           const subset: Row = {};
           selectedCols.forEach((col) => (subset[col] = row[col]));
-          const res = await fetch("/api/process-row", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+          let result: { output: string; latency: number };
+          if (isTauri) {
+            result = await processRowDirect({
               provider: activeModel.providerId,
               model: activeModel.defaultModel,
-              apiKey: activeModel.apiKey || "local",
+              apiKey: activeModel.apiKey || "",
               baseUrl: activeModel.baseUrl,
               systemPrompt,
               userContent: Object.entries(subset).map(([k, v]) => `${k}: ${String(v ?? "")}`).join("\n"),
               temperature: 0,
-            }),
-          });
-          const result = await res.json();
-          if (result.error) throw new Error(result.error);
-          const latency = Date.now() - t0;
+            });
+          } else {
+            const res = await fetch("/api/process-row", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                provider: activeModel.providerId,
+                model: activeModel.defaultModel,
+                apiKey: activeModel.apiKey || "local",
+                baseUrl: activeModel.baseUrl,
+                systemPrompt,
+                userContent: Object.entries(subset).map(([k, v]) => `${k}: ${String(v ?? "")}`).join("\n"),
+                temperature: 0,
+              }),
+            });
+            const json = await res.json();
+            if (json.error) throw new Error(json.error);
+            result = { output: json.output, latency: (Date.now() - t0) / 1000 };
+          }
+          const latency = isTauri ? Math.round(result.latency * 1000) : Date.now() - t0;
           latencies.push(latency);
           newResults[idx] = { ...row, ai_output: result.output, status: "success", latency_ms: latency };
         } catch (err) {
@@ -166,17 +197,19 @@ export default function TransformPage() {
 
     if (localRunId) {
       try {
-        await fetch("/api/results", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            runId: localRunId,
-            results: newResults.map((r, i) => ({
-              rowIndex: i, input: r, output: r.ai_output,
-              status: r.status, latency: r.latency_ms, errorMessage: r.error_msg,
-            })),
-          }),
-        });
+        const resultRows = newResults.map((r, i) => ({
+          rowIndex: i, input: r as Record<string, unknown>, output: (r.ai_output ?? "") as string,
+          status: r.status as string, latency: r.latency_ms as number | undefined, errorMessage: r.error_msg as string | undefined,
+        }));
+        if (isTauri) {
+          await saveResults(localRunId, resultRows);
+        } else {
+          await fetch("/api/results", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ runId: localRunId, results: resultRows }),
+          });
+        }
       } catch { /* non-fatal */ }
     }
 

@@ -40,6 +40,7 @@ import type { Row } from "@/types";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { processRowDirect } from "@/lib/llm-browser";
 
 // ─── Palette (matches Python CODE_COLORS) ─────────────────────────────────
 const CODE_COLORS = [
@@ -202,6 +203,8 @@ function timeAgo(date: Date): string {
   if (mins < 60) return `${mins}m ago`;
   return `${Math.floor(mins / 60)}h ago`;
 }
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 // ─── Main Page ──────────────────────────────────────────────────────────────
 export default function AICoderPage() {
@@ -430,23 +433,37 @@ export default function AICoderPage() {
     if (rowIdx === undefined) setIsAiLoading(true);
     try {
       const rowText = getRowText(row);
-      const res = await fetch("/api/process-row", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider: activeModel.providerId,
-          model: activeModel.defaultModel,
-          apiKey: activeModel.apiKey || "local",
-          baseUrl: activeModel.baseUrl,
-          systemPrompt: `You are a qualitative coding assistant. Analyze the text and return ONLY valid JSON:
+      const systemPrompt = `You are a qualitative coding assistant. Analyze the text and return ONLY valid JSON:
 {"codes": ["Code1"], "confidence": {"Code1": 0.95}, "reasoning": "brief explanation"}
 Available codes: ${codes.join(", ")}
-Only use codes from the list. Confidence 0.0–1.0.`,
+Only use codes from the list. Confidence 0.0–1.0.`;
+      let result: { output?: string; error?: string };
+      if (isTauri) {
+        result = await processRowDirect({
+          provider: activeModel.providerId,
+          model: activeModel.defaultModel,
+          apiKey: activeModel.apiKey || "",
+          baseUrl: activeModel.baseUrl,
+          systemPrompt,
           userContent: rowText,
           temperature: 0,
-        }),
-      });
-      const result = await res.json();
+        });
+      } else {
+        const res = await fetch("/api/process-row", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: activeModel.providerId,
+            model: activeModel.defaultModel,
+            apiKey: activeModel.apiKey || "local",
+            baseUrl: activeModel.baseUrl,
+            systemPrompt,
+            userContent: rowText,
+            temperature: 0,
+          }),
+        });
+        result = await res.json();
+      }
       if (result.error) throw new Error(result.error);
 
       let suggestion: AISuggestion = { codes: [], confidence: {} };

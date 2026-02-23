@@ -24,6 +24,8 @@ import {
 import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
+import { automatorRowDirect } from "@/lib/llm-browser";
+import { createRun, saveResults } from "@/lib/db-tauri";
 
 interface OutputField {
   name: string;
@@ -53,6 +55,8 @@ function makeStep(idx: number): Step {
     output_fields: [{ name: "result", type: "text", constraints: "" }],
   };
 }
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export default function AutomatorPage() {
   const [data, setData] = useState<Row[]>([]);
@@ -176,10 +180,8 @@ export default function AutomatorPage() {
 
     let localRunId: string | null = null;
     try {
-      const runRes = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (isTauri) {
+        const rd = await createRun({
           runType: "automator",
           provider: provider.providerId,
           model: provider.defaultModel,
@@ -187,10 +189,25 @@ export default function AutomatorPage() {
           systemPrompt: JSON.stringify(steps),
           inputFile: dataName || "unnamed_data",
           inputRows: targetData.length,
-        }),
-      });
-      const rd = await runRes.json();
-      localRunId = rd.id ?? null;
+        });
+        localRunId = rd.id ?? null;
+      } else {
+        const runRes = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runType: "automator",
+            provider: provider.providerId,
+            model: provider.defaultModel,
+            temperature: 0,
+            systemPrompt: JSON.stringify(steps),
+            inputFile: dataName || "unnamed_data",
+            inputRows: targetData.length,
+          }),
+        });
+        const rd = await runRes.json();
+        localRunId = rd.id ?? null;
+      }
     } catch { /* non-fatal */ }
 
     const tasks = targetData.map((row, idx) =>
@@ -198,21 +215,33 @@ export default function AutomatorPage() {
         if (abortRef.current) return;
         const t0 = Date.now();
         try {
-          const res = await fetch("/api/automator-row", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+          let result: { output: Row; stepResults?: unknown; success?: boolean };
+          if (isTauri) {
+            result = await automatorRowDirect({
               row,
               steps,
               provider: provider.providerId,
               model: provider.defaultModel,
-              apiKey: provider.apiKey || "local",
+              apiKey: provider.apiKey || "",
               baseUrl: provider.baseUrl,
-            }),
-          });
-
-          const result = await res.json();
-          if (result.error) throw new Error(result.error);
+            });
+          } else {
+            const res = await fetch("/api/automator-row", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                row,
+                steps,
+                provider: provider.providerId,
+                model: provider.defaultModel,
+                apiKey: provider.apiKey || "local",
+                baseUrl: provider.baseUrl,
+              }),
+            });
+            const json = await res.json();
+            if (json.error) throw new Error(json.error);
+            result = json;
+          }
 
           newResults[idx] = { ...result.output, status: "success", latency: Date.now() - t0 };
         } catch (err) {
@@ -228,21 +257,23 @@ export default function AutomatorPage() {
 
     if (localRunId) {
       try {
-        await fetch("/api/results", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            runId: localRunId,
-            results: newResults.map((r, i) => ({
-              rowIndex: i,
-              input: r,
-              output: r,
-              status: r.status,
-              latency: r.latency,
-              errorMessage: r.errorMessage,
-            })),
-          }),
-        });
+        const resultRows = newResults.map((r, i) => ({
+          rowIndex: i,
+          input: r,
+          output: r,
+          status: r.status as string,
+          latency: r.latency as number | undefined,
+          errorMessage: r.errorMessage as string | undefined,
+        }));
+        if (isTauri) {
+          await saveResults(localRunId, resultRows);
+        } else {
+          await fetch("/api/results", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ runId: localRunId, results: resultRows }),
+          });
+        }
       } catch { /* non-fatal */ }
     }
 

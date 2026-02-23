@@ -12,6 +12,8 @@ import { AlertCircle, Sparkles, Plus, Trash2, Download, Loader2, Minus, External
 import Link from "next/link";
 import { toast } from "sonner";
 import type { GenerateColumn, Row } from "@/types";
+import { generateRowDirect } from "@/lib/llm-browser";
+import { createRun } from "@/lib/db-tauri";
 
 // ─── Sample prompts ──────────────────────────────────────────────────────────
 const SAMPLE_PROMPTS: Record<string, string> = {
@@ -35,6 +37,8 @@ const VARIATION_LEVELS = [
   { label: "High", value: 0.9 },
   { label: "Maximum", value: 1.0 },
 ];
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export default function GeneratePage() {
   const activeModel = useActiveModel();
@@ -80,40 +84,65 @@ export default function GeneratePage() {
 
     let localRunId: string | null = null;
     try {
-      const runRes = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (isTauri) {
+        const rd = await createRun({
           runType: "generate",
           provider: activeModel.providerId,
           model: activeModel.defaultModel,
           temperature,
           inputFile: "synthetic",
           inputRows: count,
-        }),
-      });
-      const rd = await runRes.json();
-      localRunId = rd.id ?? null;
+        });
+        localRunId = rd.id ?? null;
+      } else {
+        const runRes = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runType: "generate",
+            provider: activeModel.providerId,
+            model: activeModel.defaultModel,
+            temperature,
+            inputFile: "synthetic",
+            inputRows: count,
+          }),
+        });
+        const rd = await runRes.json();
+        localRunId = rd.id ?? null;
+      }
     } catch { /* non-fatal */ }
 
     try {
-      const res = await fetch("/api/generate-row", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      let data: { rows: Row[]; rawCsv?: string; count?: number; raw?: string; error?: string };
+      if (isTauri) {
+        data = await generateRowDirect({
           provider: activeModel.providerId,
           model: activeModel.defaultModel,
-          apiKey: activeModel.apiKey || "local",
+          apiKey: activeModel.apiKey || "",
           baseUrl: activeModel.baseUrl,
           rowCount: count,
           columns: structure === "define_columns" ? columns : undefined,
           freeformPrompt: description || undefined,
-          outputFormat,
           temperature,
-        }),
-      });
-
-      const data = await res.json();
+        });
+      } else {
+        const res = await fetch("/api/generate-row", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: activeModel.providerId,
+            model: activeModel.defaultModel,
+            apiKey: activeModel.apiKey || "local",
+            baseUrl: activeModel.baseUrl,
+            rowCount: count,
+            columns: structure === "define_columns" ? columns : undefined,
+            freeformPrompt: description || undefined,
+            outputFormat,
+            temperature,
+          }),
+        });
+        data = await res.json();
+      }
       if (data.error) throw new Error(data.error);
 
       if (outputFormat === "tabular") {

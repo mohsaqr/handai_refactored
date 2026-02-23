@@ -12,6 +12,8 @@ import { Download, Loader2, CheckCircle2, AlertCircle, ExternalLink } from "luci
 import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
+import { comparisonRowDirect } from "@/lib/llm-browser";
+import { createRun } from "@/lib/db-tauri";
 
 type Row = Record<string, unknown>;
 type RunMode = "preview" | "test" | "full";
@@ -21,6 +23,8 @@ function providerLabel(id: string) {
   if (id === "ollama") return "Ollama";
   return id.charAt(0).toUpperCase() + id.slice(1);
 }
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export default function ModelComparisonPage() {
   const [data, setData] = useState<Row[]>([]);
@@ -95,10 +99,8 @@ export default function ModelComparisonPage() {
     let localRunId: string | null = null;
     try {
       const firstProvider = providers[selectedProviders[0]];
-      const runRes = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (isTauri) {
+        const rd = await createRun({
           runType: "model-comparison",
           provider: selectedProviders.join(","),
           model: firstProvider?.defaultModel ?? "unknown",
@@ -106,10 +108,25 @@ export default function ModelComparisonPage() {
           systemPrompt,
           inputFile: dataName || "unnamed",
           inputRows: targetData.length,
-        }),
-      });
-      const rd = await runRes.json();
-      localRunId = rd.id ?? null;
+        });
+        localRunId = rd.id ?? null;
+      } else {
+        const runRes = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runType: "model-comparison",
+            provider: selectedProviders.join(","),
+            model: firstProvider?.defaultModel ?? "unknown",
+            temperature: 0,
+            systemPrompt,
+            inputFile: dataName || "unnamed",
+            inputRows: targetData.length,
+          }),
+        });
+        const rd = await runRes.json();
+        localRunId = rd.id ?? null;
+      }
     } catch { /* non-fatal */ }
 
     const tasks = targetData.map((row, idx) =>
@@ -118,12 +135,21 @@ export default function ModelComparisonPage() {
         try {
           const subset: Row = {};
           selectedCols.forEach((col) => (subset[col] = row[col]));
-          const res = await fetch("/api/comparison-row", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ models: activeModels, systemPrompt, userContent: JSON.stringify(subset) }),
-          });
-          const result = await res.json();
+          let result: { results: Array<{ id: string; output: string; latency?: number; success?: boolean }>; error?: string };
+          if (isTauri) {
+            result = await comparisonRowDirect({
+              models: activeModels,
+              systemPrompt,
+              userContent: JSON.stringify(subset),
+            });
+          } else {
+            const res = await fetch("/api/comparison-row", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ models: activeModels, systemPrompt, userContent: JSON.stringify(subset) }),
+            });
+            result = await res.json();
+          }
           if (result.error) throw new Error(result.error);
           const updates: Row = {};
           (result.results as { id: string; output: string; latency?: number }[]).forEach((r) => {

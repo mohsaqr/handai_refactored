@@ -1,6 +1,6 @@
 # Handai — AI Data Suite (Web App)
 
-A qualitative and quantitative data analysis suite powered by LLMs. Runs as a web app or as a native desktop app (Electron or Tauri) — no code changes required between the two.
+A qualitative and quantitative data analysis suite powered by LLMs. Runs as a web app or as a native desktop app (Tauri) — no code changes required between the two.
 
 ---
 
@@ -50,12 +50,11 @@ npm run lint     # ESLint
 
 ## Desktop App
 
-The web app builds with `output: "standalone"` and can be wrapped in a native desktop shell. See [`desktop/README.md`](desktop/README.md) for build instructions.
+The web app builds with `output: "export"` (Tauri) or `output: "standalone"` (web) and can be wrapped in a native desktop shell. See [`desktop/README.md`](desktop/README.md) for build instructions.
 
 ```
 desktop/
-  electron/    ← Electron wrapper (~160 MB, uses built-in Node.js)
-  tauri/       ← Tauri wrapper (~85 MB, uses system WebView)
+  tauri/       ← Tauri wrapper (~10 MB, uses system WebView, browser-side LLM)
 ```
 
 ---
@@ -89,7 +88,7 @@ OpenAI · Anthropic · Google Gemini · Groq · Together AI · Azure OpenAI · O
 | Database | Prisma 6 + SQLite |
 | State | Zustand (localStorage persisted) |
 | Testing | Vitest |
-| Desktop | Electron 34 / Tauri 2 |
+| Desktop | Tauri 2 |
 
 ---
 

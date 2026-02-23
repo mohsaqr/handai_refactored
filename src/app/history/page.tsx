@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
   History,
@@ -22,6 +23,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import Link from "next/link";
 import type { RunMeta } from "@/types";
+import { listRuns, deleteRun } from "@/lib/db-tauri";
+import RunDetailClient from "./[id]/RunDetailClient";
 import {
   Dialog,
   DialogContent,
@@ -40,7 +43,12 @@ function formatDuration(start: string, end: string): string {
     : `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
 }
 
-export default function HistoryPage() {
+function HistoryContent() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const detailId = searchParams.get("id");
+
+  const [isTauri, setIsTauri] = useState(false);
   const [runs, setRuns] = useState<RunMeta[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -51,18 +59,28 @@ export default function HistoryPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  useEffect(() => {
+    setIsTauri(typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
+  }, []);
+
   const fetchRuns = async (pageNum = 0) => {
     setIsRefreshing(true);
     try {
       const offset = pageNum * PAGE_SIZE;
-      const res = await fetch(`/api/runs?limit=${PAGE_SIZE}&offset=${offset}`);
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        setRuns(data as RunMeta[]);
-        setTotal(data.length);
-      } else {
+      if (isTauri) {
+        const data = await listRuns(PAGE_SIZE, offset);
         setRuns(data.runs as RunMeta[]);
         setTotal(data.total ?? 0);
+      } else {
+        const res = await fetch(`/api/runs?limit=${PAGE_SIZE}&offset=${offset}`);
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setRuns(data as RunMeta[]);
+          setTotal(data.length);
+        } else {
+          setRuns(data.runs as RunMeta[]);
+          setTotal(data.total ?? 0);
+        }
       }
       setPage(pageNum);
     } catch {
@@ -74,7 +92,8 @@ export default function HistoryPage() {
 
   useEffect(() => {
     fetchRuns(0);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTauri]);
 
   const uniqueProviders = [...new Set(runs.map((r) => r.provider).filter(Boolean))].sort();
 
@@ -95,8 +114,13 @@ export default function HistoryPage() {
     if (!confirmDeleteId) return;
     setIsDeleting(true);
     try {
-      const res = await fetch(`/api/runs/${confirmDeleteId}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Delete failed");
+      if (isTauri) {
+        const result = await deleteRun(confirmDeleteId);
+        if (!result.ok) throw new Error("Delete failed");
+      } else {
+        const res = await fetch(`/api/runs/${confirmDeleteId}`, { method: "DELETE" });
+        if (!res.ok) throw new Error("Delete failed");
+      }
       toast.success("Run deleted");
       setRuns((prev) => prev.filter((r) => r.id !== confirmDeleteId));
       setTotal((prev) => prev - 1);
@@ -107,6 +131,19 @@ export default function HistoryPage() {
       setConfirmDeleteId(null);
     }
   };
+
+  const navigateToDetail = (id: string) => {
+    if (isTauri) {
+      router.push(`/history?id=${id}`);
+    } else {
+      router.push(`/history/${id}`);
+    }
+  };
+
+  // In Tauri, show the detail view inline when ?id= param is present
+  if (detailId) {
+    return <RunDetailClient id={detailId} />;
+  }
 
   return (
     <div className="max-w-4xl mx-auto space-y-0 pb-16">
@@ -188,76 +225,78 @@ export default function HistoryPage() {
         )}
 
         {filteredRuns.map((run) => (
-          <Link key={run.id} href={`/history/${run.id}`}>
-            <div className="group flex items-center p-4 gap-4 rounded-xl border bg-card hover:border-indigo-300 dark:hover:border-indigo-700 transition-all duration-150 hover:shadow-sm">
-              <div
-                className={`h-10 w-10 rounded-lg flex items-center justify-center shrink-0 ${
-                  run.status === "completed"
-                    ? "bg-green-50 dark:bg-green-950/30 text-green-600"
-                    : "bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600"
-                }`}
-              >
-                {run.status === "completed" ? (
-                  <CheckCircle2 className="h-5 w-5" />
-                ) : (
-                  <Play className="h-5 w-5" />
-                )}
-              </div>
+          <div
+            key={run.id}
+            onClick={() => navigateToDetail(run.id)}
+            className="group flex items-center p-4 gap-4 rounded-xl border bg-card hover:border-indigo-300 dark:hover:border-indigo-700 transition-all duration-150 hover:shadow-sm cursor-pointer"
+          >
+            <div
+              className={`h-10 w-10 rounded-lg flex items-center justify-center shrink-0 ${
+                run.status === "completed"
+                  ? "bg-green-50 dark:bg-green-950/30 text-green-600"
+                  : "bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600"
+              }`}
+            >
+              {run.status === "completed" ? (
+                <CheckCircle2 className="h-5 w-5" />
+              ) : (
+                <Play className="h-5 w-5" />
+              )}
+            </div>
 
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="font-semibold truncate text-sm">{run.inputFile}</span>
-                  <Badge variant="outline" className="text-[10px] capitalize px-1 py-0 shrink-0">
-                    {run.runType}
-                  </Badge>
-                  <Badge variant="secondary" className="text-[10px] px-1 py-0 shrink-0">
-                    {run.provider}/{run.model}
-                  </Badge>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-semibold truncate text-sm">{run.inputFile}</span>
+                <Badge variant="outline" className="text-[10px] capitalize px-1 py-0 shrink-0">
+                  {run.runType}
+                </Badge>
+                <Badge variant="secondary" className="text-[10px] px-1 py-0 shrink-0">
+                  {run.provider}/{run.model}
+                </Badge>
+              </div>
+              <div className="flex items-center gap-4 text-[10px] text-muted-foreground">
+                <div className="flex items-center gap-1">
+                  <Calendar className="h-3 w-3" />
+                  {new Date(run.startedAt).toLocaleDateString()}
                 </div>
-                <div className="flex items-center gap-4 text-[10px] text-muted-foreground">
-                  <div className="flex items-center gap-1">
-                    <Calendar className="h-3 w-3" />
-                    {new Date(run.startedAt).toLocaleDateString()}
-                  </div>
+                <div className="flex items-center gap-1">
+                  <Clock className="h-3 w-3" />
+                  {new Date(run.startedAt).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </div>
+                {run.completedAt && (
                   <div className="flex items-center gap-1">
                     <Clock className="h-3 w-3" />
-                    {new Date(run.startedAt).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
+                    {formatDuration(run.startedAt, run.completedAt)}
                   </div>
-                  {run.completedAt && (
-                    <div className="flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
-                      {formatDuration(run.startedAt, run.completedAt)}
-                    </div>
-                  )}
-                  <span className="font-medium text-foreground">
-                    {run.successCount} Success / {run.errorCount} Error
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3 shrink-0">
-                <div className="text-right hidden sm:block">
-                  <div className="text-[10px] font-medium text-foreground">
-                    {run.avgLatency ? `${(run.avgLatency / 1000).toFixed(2)}s avg` : "N/A"}
-                  </div>
-                  <div className="text-[9px] text-muted-foreground">{run.inputRows} rows</div>
-                </div>
-                <button
-                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirmDeleteId(run.id); }}
-                  className="h-8 w-8 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-red-500"
-                  title="Delete run"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-                <div className="h-8 w-8 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground">
-                  <ArrowRight className="h-4 w-4" />
-                </div>
+                )}
+                <span className="font-medium text-foreground">
+                  {run.successCount} Success / {run.errorCount} Error
+                </span>
               </div>
             </div>
-          </Link>
+
+            <div className="flex items-center gap-3 shrink-0">
+              <div className="text-right hidden sm:block">
+                <div className="text-[10px] font-medium text-foreground">
+                  {run.avgLatency ? `${(run.avgLatency / 1000).toFixed(2)}s avg` : "N/A"}
+                </div>
+                <div className="text-[9px] text-muted-foreground">{run.inputRows} rows</div>
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(run.id); }}
+                className="h-8 w-8 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-red-500"
+                title="Delete run"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+              <div className="h-8 w-8 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground">
+                <ArrowRight className="h-4 w-4" />
+              </div>
+            </div>
+          </div>
         ))}
       </div>
 
@@ -309,5 +348,19 @@ export default function HistoryPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function HistoryPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-[60vh] items-center justify-center">
+          <Loader2 className="h-8 w-8 animate-spin text-indigo-500" />
+        </div>
+      }
+    >
+      <HistoryContent />
+    </Suspense>
   );
 }

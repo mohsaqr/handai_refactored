@@ -204,36 +204,22 @@ Loading new data when codedCount > 0:
 
 ## Desktop Packaging
 
-The web app builds with `output: "standalone"` which produces a self-contained `server.js` with minimal `node_modules`. Both desktop wrappers use this:
-
-```
-npm run build (in web/)
-  → .next/standalone/server.js  ← shipped in desktop bundles
-  → .next/static/               ← static assets (copied alongside)
-  → public/                     ← public assets
-```
-
-### Electron (web/desktop/electron/)
-- Spawns `server.js` using the **built-in Node.js from Electron itself**
-- No separate Node.js installation required
-- Polls port 3947 before showing window
-- All API routes work unchanged
-- Bundle: ~160 MB
-
 ### Tauri (web/desktop/tauri/)
-- Spawns `server.js` as a `tauri-plugin-shell` sidecar
-- Requires bundling a platform Node.js binary in `src-tauri/binaries/`
-- System WebView (no bundled Chromium) — **WKWebView on macOS**
-- Bundle: ~85 MB (Phase A), ~10 MB after Phase B migration
-- **Plugins**: `tauri-plugin-shell` (sidecar), `tauri-plugin-window-state` (size/position), `tauri-plugin-dialog` (native save-file dialog)
-- **CSV export**: WKWebView ignores HTML `download` attribute; detect `window.__TAURI_INTERNALS__` and invoke `save_file` command → `blocking_save_file()` → OS save dialog
-- **DB path**: production sets `DATABASE_URL=file:{app_data_dir}/handai.db` → `~/Library/Application Support/me.saqr.handai/handai.db`
 
-### Phase B migration path (Tauri only)
-1. Move LLM API route logic → direct browser `fetch()` (no server needed)
-2. Replace Prisma → `tauri-plugin-sql` raw SQL
-3. Replace `pdf-parse` → `pdfjs-dist` (WASM browser build)
-4. Result: no sidecar, instant startup, ~10 MB bundle
+Phase B — no sidecar, browser-side LLM calls, instant startup, ~10 MB bundle.
+
+```
+npm run build:tauri (in web/)
+  → out/  ← static export (no API routes needed)
+```
+
+- **LLM calls**: browser `fetch()` directly to provider APIs — `getModel()` + `withRetry()` are pure fetch, no Node.js
+- **Database**: `tauri-plugin-sql` (SQLite via `@tauri-apps/plugin-sql` frontend API)
+- **PDF/DOCX**: `pdfjs-dist` (WASM) + mammoth browser build — no Node.js buffers
+- **Detection**: `"__TAURI_INTERNALS__" in window` → take browser-direct path; otherwise use `/api/*` routes
+- **Plugins**: `tauri-plugin-sql` (SQLite DB), `tauri-plugin-window-state` (size/position), `tauri-plugin-dialog` (native save-file dialog)
+- **CSV export**: WKWebView ignores HTML `download` attribute; detect `window.__TAURI_INTERNALS__` and invoke `save_file` command → `blocking_save_file()` → OS save dialog
+- **Bundle**: ~10 MB (system WebView, no bundled Chromium or Node.js)
 
 ---
 

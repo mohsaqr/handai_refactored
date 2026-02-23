@@ -31,6 +31,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type { Row } from "@/types";
+import { documentExtractDirect } from "@/lib/llm-browser";
+import { createRun, saveResults } from "@/lib/db-tauri";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 interface FileEntry {
@@ -110,6 +112,8 @@ function getFileTypeKey(file: File): string | null {
   }
   return null;
 }
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export default function ProcessDocumentsPage() {
   const activeModel = useActiveModel();
@@ -215,10 +219,8 @@ Return ONLY a JSON array where each element has consistent field names. No expla
 
     let localRunId: string | null = null;
     try {
-      const runRes = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (isTauri) {
+        const rd = await createRun({
           runType: "process-documents",
           provider: activeModel.providerId,
           model: activeModel.defaultModel,
@@ -226,10 +228,25 @@ Return ONLY a JSON array where each element has consistent field names. No expla
           systemPrompt,
           inputFile: files.map((f) => f.name).join(", ") || "unnamed",
           inputRows: targetFiles.length,
-        }),
-      });
-      const rd = await runRes.json();
-      localRunId = rd.id ?? null;
+        });
+        localRunId = rd.id ?? null;
+      } else {
+        const runRes = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            runType: "process-documents",
+            provider: activeModel.providerId,
+            model: activeModel.defaultModel,
+            temperature: 0,
+            systemPrompt,
+            inputFile: files.map((f) => f.name).join(", ") || "unnamed",
+            inputRows: targetFiles.length,
+          }),
+        });
+        const rd = await runRes.json();
+        localRunId = rd.id ?? null;
+      }
     } catch { /* non-fatal */ }
 
     for (let i = 0; i < targetFiles.length; i++) {
@@ -238,30 +255,41 @@ Return ONLY a JSON array where each element has consistent field names. No expla
 
       const entry = targetFiles[i];
       try {
-        const buffer = await entry.file.arrayBuffer();
-        const base64 = btoa(
-          new Uint8Array(buffer).reduce((data, byte) => data + String.fromCharCode(byte), "")
-        );
-
-        const fileTypeKey = getFileTypeKey(entry.file);
-        const fileType = fileTypeKey?.replace("txt_md", "txt").replace("json_csv", "json").replace("html_xml", "html") ?? "txt";
-
-        const res = await fetch("/api/document-extract", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            fileContent: base64,
-            fileType,
-            fileName: entry.file.name,
+        let data: { records?: Record<string, unknown>[]; error?: string; fileName?: string; charCount?: number; count?: number };
+        if (isTauri) {
+          data = await documentExtractDirect({
+            file: entry.file,
             provider: activeModel.providerId,
             model: activeModel.defaultModel,
-            apiKey: activeModel.apiKey || "local",
+            apiKey: activeModel.apiKey || "",
             baseUrl: activeModel.baseUrl,
             systemPrompt,
-          }),
-        });
+          });
+        } else {
+          const buffer = await entry.file.arrayBuffer();
+          const base64 = btoa(
+            new Uint8Array(buffer).reduce((d, byte) => d + String.fromCharCode(byte), "")
+          );
 
-        const data = await res.json();
+          const fileTypeKey = getFileTypeKey(entry.file);
+          const fileType = fileTypeKey?.replace("txt_md", "txt").replace("json_csv", "json").replace("html_xml", "html") ?? "txt";
+
+          const res = await fetch("/api/document-extract", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              fileContent: base64,
+              fileType,
+              fileName: entry.file.name,
+              provider: activeModel.providerId,
+              model: activeModel.defaultModel,
+              apiKey: activeModel.apiKey || "local",
+              baseUrl: activeModel.baseUrl,
+              systemPrompt,
+            }),
+          });
+          data = await res.json();
+        }
         if (data.error) throw new Error(data.error);
 
         const records = (data.records as Row[]).map((r) => ({

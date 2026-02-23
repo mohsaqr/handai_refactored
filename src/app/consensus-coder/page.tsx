@@ -18,6 +18,10 @@ import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
 import type { Row } from "@/types";
+import { consensusRowDirect } from "@/lib/llm-browser";
+import { createRun } from "@/lib/db-tauri";
+
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 type RunMode = "preview" | "test" | "full";
 
@@ -146,21 +150,18 @@ export default function ConsensusCoderPage() {
 
     let localRunId: string | null = null;
     try {
-      const runRes = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          runType: "consensus-coder",
-          provider: judge.providerId,
-          model: judge.model,
-          temperature: 0,
-          systemPrompt: judgePrompt,
-          inputFile: dataName || "unnamed",
-          inputRows: targetData.length,
-        }),
-      });
-      const rd = await runRes.json();
-      localRunId = rd.id ?? null;
+      if (isTauri) {
+        const rd = await createRun({ runType: "consensus-coder", provider: judge.providerId, model: judge.model, temperature: 0, systemPrompt: judgePrompt, inputFile: dataName || "unnamed", inputRows: targetData.length });
+        localRunId = rd.id;
+      } else {
+        const runRes = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ runType: "consensus-coder", provider: judge.providerId, model: judge.model, temperature: 0, systemPrompt: judgePrompt, inputFile: dataName || "unnamed", inputRows: targetData.length }),
+        });
+        const rd = await runRes.json();
+        localRunId = rd.id ?? null;
+      }
     } catch { /* non-fatal */ }
 
     const limit = pLimit(3);
@@ -180,24 +181,38 @@ export default function ConsensusCoderPage() {
         try {
           const subset: Row = {};
           selectedCols.forEach((col) => (subset[col] = row[col]));
-          const res = await fetch("/api/consensus-row", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              workers,
-              judge: { provider: judge.providerId, model: judge.model, apiKey: pJ.apiKey || "local", baseUrl: pJ.baseUrl },
+
+          let result: Awaited<ReturnType<typeof consensusRowDirect>>;
+          if (isTauri) {
+            result = await consensusRowDirect({
+              workers: workers.map((w) => ({ provider: w.provider, model: w.model, apiKey: w.apiKey || "", baseUrl: w.baseUrl })),
+              judge: { provider: judge.providerId, model: judge.model, apiKey: pJ.apiKey || "", baseUrl: pJ.baseUrl },
               workerPrompt,
               judgePrompt,
               userContent: JSON.stringify(subset),
-              rowIdx: idx,
-              includeReasoning: includeJudgeReasoning,
               enableQualityScoring,
               enableDisagreementAnalysis,
-            }),
-          });
-
-          const result = await res.json();
-          if (result.error) throw new Error(result.error);
+            });
+          } else {
+            const res = await fetch("/api/consensus-row", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                workers,
+                judge: { provider: judge.providerId, model: judge.model, apiKey: pJ.apiKey || "local", baseUrl: pJ.baseUrl },
+                workerPrompt,
+                judgePrompt,
+                userContent: JSON.stringify(subset),
+                rowIdx: idx,
+                includeReasoning: includeJudgeReasoning,
+                enableQualityScoring,
+                enableDisagreementAnalysis,
+              }),
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            result = data;
+          }
 
           if (result.kappa !== null && result.kappa !== undefined) {
             runningKappa = result.kappa;

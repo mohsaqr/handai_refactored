@@ -1,67 +1,21 @@
 # Handai — Desktop Packaging
 
-Two independent wrappers for the Next.js web app. The web app itself (`web/`) is unchanged and deploys normally as a web app. These wrappers only add a desktop shell.
+Tauri wrapper for the Handai Next.js web app. Phase B: no Node.js sidecar, browser-side LLM calls, SQLite via `tauri-plugin-sql`, ~10 MB bundle.
 
 ## Architecture
 
 ```
 web/                          ← Next.js app (web-deployable as-is)
-  .next/standalone/           ← built output (npm run build)
-    server.js                 ← self-contained Node.js server
-    node_modules/             ← minimal deps only
+  out/                        ← static export (npm run build:tauri)
 web/desktop/
-  electron/                   ← Electron wrapper (spawns server.js)
-  tauri/                      ← Tauri wrapper (sidecar approach)
+  tauri/                      ← Tauri wrapper (browser-side LLM + SQL)
 ```
 
-Both wrappers use the **same strategy**:
-1. `npm run build` in `web/` → produces `.next/standalone/server.js`
-2. Desktop app spawns `node server.js` on port 3947
-3. Native window loads `http://127.0.0.1:3947`
-4. All 10 API routes, Prisma/SQLite, and LLM calls work unchanged
+### Compatibility layer
 
----
-
-## Electron
-
-### Prerequisites
-```bash
-node >= 20
-npm >= 10
-```
-
-### Dev (no packaging)
-```bash
-# 1. Build the web app (needed once; re-run after web changes)
-cd web && npm run build && cd ..
-
-# 2. Run Electron pointing at the standalone build
-cd web/desktop/electron
-npm install
-npm start
-```
-
-### Package
-```bash
-cd web/desktop/electron
-npm run build          # builds web + packages Electron app
-# Output: web/desktop/electron/dist/
-```
-
-### How it works
-`main.js` spawns `process.execPath` (the bundled Node.js in Electron) with `server.js`. This means:
-- **No separate Node.js installation required** — Electron bundles Node.js
-- Polls `http://127.0.0.1:3947` every 300ms (max 15s) before showing the window
-- Kills the server process cleanly on `before-quit`
-- External links open in the system browser
-
-### Bundle contents
-| Component | Size |
-|---|---|
-| Electron shell + Chromium | ~130 MB |
-| Next.js standalone server | ~25 MB |
-| `.next/static` (CSS/JS assets) | ~5 MB |
-| **Total** | **~160 MB** |
+Pages detect `__TAURI_INTERNALS__` at runtime:
+- **Tauri path**: LLM calls go direct from browser via `src/lib/llm-browser.ts`; DB via `src/lib/db-tauri.ts` (`@tauri-apps/plugin-sql`)
+- **Web path**: existing `/api/*` routes unchanged — web deployment fully working
 
 ---
 
@@ -79,80 +33,41 @@ rustup (stable toolchain)
 ### Tauri plugins
 | Plugin | Purpose |
 |---|---|
-| `tauri-plugin-shell` | Spawn Node.js sidecar (production only) |
+| `tauri-plugin-sql` | SQLite database (replaces Prisma/Node.js) |
 | `tauri-plugin-window-state` | Persist window size/position across launches |
 | `tauri-plugin-dialog` | Native OS save-file dialog for CSV export |
 
 > **Why a native dialog for CSV?** WKWebView (macOS system WebView) does not support the HTML `download` attribute. Blob URL + anchor-click silently fails. The web app detects Tauri via `window.__TAURI_INTERNALS__` and invokes the `save_file` command instead.
 
-### Phase A — Sidecar (current, zero web code changes)
-
-The Tauri app bundles a Node.js binary as an `externalBin` sidecar and spawns the Next.js server on startup.
-
-**Step 1: Obtain a Node.js binary for each platform**
+### Dev (instant window, no sidecar)
 ```bash
-# macOS arm64 example — adapt for your CI matrix
-NODE_VERSION=22.0.0
-curl -L "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-arm64.tar.gz" | tar xz
-mkdir -p web/desktop/tauri/src-tauri/binaries
-cp node-v${NODE_VERSION}-darwin-arm64/bin/node \
-   web/desktop/tauri/src-tauri/binaries/node-aarch64-apple-darwin
-```
-> Tauri requires platform-suffixed binary names. See [Tauri sidecar docs](https://tauri.app/develop/sidecar/).
+# Terminal 1: run the Next.js dev server
+cd web && npm run dev
 
-**Step 2: Build**
-```bash
-cd web && npm run build && cd ..
+# Terminal 2: open Tauri window pointing at the dev server
 cd web/desktop/tauri
 npm install
-npm run build          # calls `tauri build`
+npm run tauri dev
 ```
 
-### Phase B — Full migration (future, smaller bundle ~15 MB)
+### Production build (static export)
+```bash
+# 1. Build web app as static export
+cd web && npm run build:tauri   # produces web/out/
 
-See `ARCHITECTURE.md` for the complete migration plan. Summary:
-- Move LLM calls from API routes → browser `fetch()` directly to LLM providers
-- Replace Prisma → `tauri-plugin-sql` (SQLite via Rust)
-- Replace `pdf-parse` → `pdfjs-dist` (WASM, browser-native)
-- Result: no sidecar needed, bundle shrinks to ~15 MB, instant startup
+# 2. Build Tauri app
+cd web/desktop/tauri
+npm run tauri build
+```
 
 ### Bundle size comparison
 
-| | Electron | Tauri (Phase A) | Tauri (Phase B) |
-|---|---|---|---|
-| Shell | 130 MB (Chromium) | 5 MB (system WebView) | 5 MB |
-| Node.js sidecar | 0 (built-in) | ~50 MB bundled | 0 |
-| App code | ~30 MB | ~30 MB | ~5 MB |
-| **Total** | **~160 MB** | **~85 MB** | **~10 MB** |
-
----
-
-## CI Matrix (GitHub Actions)
-
-```yaml
-jobs:
-  desktop:
-    strategy:
-      matrix:
-        include:
-          - os: macos-14        # arm64
-          - os: macos-13        # x64
-          - os: windows-latest
-          - os: ubuntu-22.04
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - name: Build web
-        run: cd web && npm ci && npm run build
-      - name: Package Electron
-        run: cd web/desktop/electron && npm ci && npm run build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: handai-${{ matrix.os }}
-          path: web/desktop/electron/dist/**
-```
+| | Tauri (Phase B) |
+|---|---|
+| Shell (system WebView) | ~5 MB |
+| Node.js sidecar | 0 (eliminated) |
+| App code | ~5 MB |
+| **Total** | **~10 MB** |
 
 ---
 
@@ -173,4 +88,4 @@ ENV PORT=3000 HOSTNAME=0.0.0.0
 CMD ["node", "server.js"]
 ```
 
-The only change to `web/` for desktop support was adding `output: "standalone"` to `next.config.ts`. This has zero impact on web deployment.
+The Tauri build uses `output: "export"` (via `TAURI_BUILD=1 next build`), which is separate from the standard web build (`output: "standalone"`).

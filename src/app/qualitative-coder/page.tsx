@@ -17,6 +17,8 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
+import { processRowDirect } from "@/lib/llm-browser";
+import { createRun, saveResults } from "@/lib/db-tauri";
 
 type Row = Record<string, unknown>;
 type RunMode = "preview" | "test" | "full";
@@ -183,6 +185,8 @@ function buildPrompt(systemPrompt: string, codebook: CodeEntry[], inject: boolea
   return systemPrompt.trimEnd() + "\n" + lines.join("\n");
 }
 
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
 export default function QualitativeCoderPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
@@ -335,13 +339,18 @@ export default function QualitativeCoderPage() {
 
     let localRunId: string | null = null;
     try {
-      const runRes = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ runType: "qualitative-coder", provider: provider.providerId, model: provider.defaultModel, temperature: 0, systemPrompt: buildPrompt(systemPrompt, codebook, injectCodebook), inputFile: dataName || "unnamed", inputRows: targetData.length }),
-      });
-      const rd = await runRes.json();
-      localRunId = rd.id ?? null;
+      if (isTauri) {
+        const rd = await createRun({ runType: "qualitative-coder", provider: provider.providerId, model: provider.defaultModel, temperature: 0, systemPrompt: buildPrompt(systemPrompt, codebook, injectCodebook), inputFile: dataName || "unnamed", inputRows: targetData.length });
+        localRunId = rd.id;
+      } else {
+        const runRes = await fetch("/api/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ runType: "qualitative-coder", provider: provider.providerId, model: provider.defaultModel, temperature: 0, systemPrompt: buildPrompt(systemPrompt, codebook, injectCodebook), inputFile: dataName || "unnamed", inputRows: targetData.length }),
+        });
+        const rd = await runRes.json();
+        localRunId = rd.id ?? null;
+      }
     } catch { /* non-fatal */ }
 
     const tasks = targetData.map((row, idx) =>
@@ -351,16 +360,25 @@ export default function QualitativeCoderPage() {
         try {
           const subset: Row = {};
           selectedCols.forEach((col) => (subset[col] = row[col]));
-          const res = await fetch("/api/process-row", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider: provider.providerId, model: provider.defaultModel, apiKey: provider.apiKey || "local", baseUrl: provider.baseUrl, systemPrompt: buildPrompt(systemPrompt, codebook, injectCodebook), userContent: JSON.stringify(subset), rowIdx: idx, temperature: 0 }),
-          });
-          const result = await res.json();
-          if (result.error) throw new Error(result.error);
-          const latency = Date.now() - t0;
+          let outputText: string;
+          let latency: number;
+          if (isTauri) {
+            const result = await processRowDirect({ provider: provider.providerId, model: provider.defaultModel, apiKey: provider.apiKey || "", baseUrl: provider.baseUrl, systemPrompt: buildPrompt(systemPrompt, codebook, injectCodebook), userContent: JSON.stringify(subset), temperature: 0 });
+            outputText = result.output;
+            latency = Math.round(result.latency * 1000);
+          } else {
+            const res = await fetch("/api/process-row", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ provider: provider.providerId, model: provider.defaultModel, apiKey: provider.apiKey || "local", baseUrl: provider.baseUrl, systemPrompt: buildPrompt(systemPrompt, codebook, injectCodebook), userContent: JSON.stringify(subset), rowIdx: idx, temperature: 0 }),
+            });
+            const result = await res.json();
+            if (result.error) throw new Error(result.error);
+            outputText = result.output;
+            latency = Date.now() - t0;
+          }
           latencies.push(latency);
-          newResults[idx] = { ...row, ai_code: result.output, status: "success", latency_ms: latency };
+          newResults[idx] = { ...row, ai_code: outputText, status: "success", latency_ms: latency };
           setProgress((prev) => ({ ...prev, completed: prev.completed + 1, success: prev.success + 1 }));
         } catch (err) {
           newResults[idx] = { ...row, ai_code: "ERROR", status: "error", error_msg: String(err) };
@@ -377,7 +395,12 @@ export default function QualitativeCoderPage() {
 
     if (localRunId) {
       try {
-        await fetch("/api/results", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: localRunId, results: newResults.map((r, i) => ({ rowIndex: i, input: r, output: r.ai_code, status: r.status, latency: r.latency_ms, errorMessage: r.error_msg })) }) });
+        const resultPayload = newResults.map((r, i) => ({ rowIndex: i, input: r as Record<string, unknown>, output: r.ai_code as string, status: r.status as string, latency: r.latency_ms as number, errorMessage: r.error_msg as string | undefined }));
+        if (isTauri) {
+          await saveResults(localRunId, resultPayload);
+        } else {
+          await fetch("/api/results", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId: localRunId, results: resultPayload }) });
+        }
       } catch { /* non-fatal */ }
     }
 

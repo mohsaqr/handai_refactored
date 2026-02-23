@@ -2,82 +2,94 @@
 
 ## Completed This Session
 
-### Tauri improvements
-- **DB path fix (critical for production)**: `DATABASE_URL` env var now set to `app_data_dir()/handai.db` before spawning sidecar → `~/Library/Application Support/me.saqr.handai/handai.db` on macOS
-- **Window state persistence**: Added `tauri-plugin-window-state`; window size/position restored automatically on startup
-- **Branded loading screen**: `web-dist/index.html` replaced with dark-indigo splash (CSS spinner, no JS)
-- **Native CSV save dialog**: Added `tauri-plugin-dialog` + `save_file` Tauri command; `downloadCSV()` detects Tauri via `__TAURI_INTERNALS__` and shows OS save dialog instead of blob-URL anchor (which WKWebView silently ignores)
+### Phase B: Remove Electron + Tauri no-sidecar migration
 
-### Export consistency
-- New `src/lib/export.ts`: shared async `downloadCSV(rows, filename)` — UTF-8 BOM CSV, browser blob OR Tauri native dialog
-- Manual Coder: filenames now `{dataName}_coded.csv` / `{dataName}_onehot.csv` (was `coded_data.csv`)
-- AI Coder: filenames now `{dataName}_ai_coded.csv` / `_ai_onehot.csv` / `_ai_full.csv`
-- Qualitative + Consensus Coder: same export logic, shared util (filenames unchanged)
+**Part A — Electron removal**
+- Deleted `web/desktop/electron/` entirely
+- Stripped all Electron mentions from README.md, ARCHITECTURE.md, HANDOFF.md, desktop/README.md
+- `web/next.config.ts` comment fixed: "Tauri" (was "Electron and Tauri")
 
-### Manual Coder UX
-- **Coded Table Preview**: Table button → scrollable panel with All/Coded/Uncoded filter pills + click-to-navigate; current row highlighted; closes on row click
-- **Session bar repositioned**: moved from top of coding view to below the big Next button and above Export Results — better matches the coding workflow
+**Part B — Tauri Phase B migration (no sidecar)**
+- `web/src/lib/llm-browser.ts` — NEW: browser-side LLM functions wrapping `generateText()` + `withRetry()`:
+  - `processRowDirect`, `generateRowDirect`, `comparisonRowDirect`, `consensusRowDirect`, `automatorRowDirect`, `documentExtractDirect`
+- `web/src/lib/document-browser.ts` — NEW: browser PDF/DOCX extraction using `pdfjs-dist` (WASM) and `mammoth` browser build
+- `web/src/lib/db-tauri.ts` — NEW: TypeScript wrappers over `@tauri-apps/plugin-sql` for `createRun`, `listRuns`, `getRun`, `deleteRun`, `saveResults`
+- **9 pages updated** with `isTauri` branching: qualitative-coder, consensus-coder, transform, automator, generate, model-comparison, ai-coder, process-documents, history
+- `AppSidebar.tsx` — Tauri-aware local model detection (direct browser fetch to Ollama/LM Studio instead of `/api/local-models`)
+- `web/next.config.ts` — dual output: `standalone` (web) vs `export` (Tauri build)
+- `web/package.json` — `build:tauri` script (shell trap to temporarily remove `api/` + `history/[id]/page.tsx`)
+- `src-tauri/Cargo.toml` — removed `tauri-plugin-shell`, added `tauri-plugin-sql` with sqlite feature
+- `src-tauri/src/main.rs` — removed sidecar spawn/TCP poll, added SQL plugin with SQLite migrations (`sessions`, `runs`, `run_results`)
+- `src-tauri/tauri.conf.json` — `frontendDist: "../../out"`, updated build commands, removed sidecar config
+- `src-tauri/capabilities/default.json` — added `sql:*` permissions, removed `shell:*`
+
+**History page architecture (Tauri-specific)**
+- `history/[id]/RunDetailClient.tsx` — NEW: extracted client component with isTauri branching
+- `history/[id]/page.tsx` — thin server wrapper (web only; excluded from Tauri build)
+- `history/page.tsx` — Tauri: detects `?id=` search param → shows `RunDetailClient` inline; list uses `router.push('/history?id=uuid')` in Tauri mode
 
 ---
 
 ## Current State
 
-### Works
-- `npm run dev` → localhost:3000 (all 24 routes)
-- `npm run build` → 0 TS errors
-- `npm test` → 76/76 tests pass
-- Tauri dev mode: `cd web/desktop/tauri && npm run tauri dev` → window opens, all features work including CSV export (native save dialog)
-- All CSV exports include data name in filename
-- Manual Coder: Table view, session bar in correct position
-- Autosave: AI Coder + Manual Coder with dual-slot + recovery banner
-- Settings: two-column, all providers, prompt templates
+### Builds
+- `npm run build` → ✅ 0 TS errors, 24 routes (standalone + API + `/history/[id]`)
+- `npm run build:tauri` → ✅ 16 static pages in `out/`
+- `npm test` → ✅ 76/76 tests pass
+
+### Tauri architecture (Phase B)
+- No Node.js sidecar: window opens instantly
+- LLM calls: browser-side via AI SDK (`llm-browser.ts`)
+- PDF/DOCX: browser extraction via `pdfjs-dist` + `mammoth` (`document-browser.ts`)
+- DB: `@tauri-apps/plugin-sql` SQLite (`db-tauri.ts`)
+- History detail: inline in `/history?id=uuid` (no dynamic route)
+- Local model detection: direct browser fetch (no CORS issue in desktop WebView)
+- CSV export: native OS save dialog via `save_file` Tauri command
+
+### Web deployment
+- All existing API routes unchanged; `/history/[id]` web route unchanged
+- Standalone output for server deployment
 
 ### Not yet done
-- Tauri production build (`tauri build`) — untested; needs Node binary sidecar + code signing
-- Electron: code written, not end-to-end tested
-- Phase B Tauri migration (LLM calls to browser, Prisma → tauri-plugin-sql)
-- GitHub Actions CI for desktop builds
-
-### Tauri plugins in use
-| Plugin | Purpose |
-|---|---|
-| `tauri-plugin-shell` | Spawn Node.js sidecar (production only) |
-| `tauri-plugin-window-state` | Persist window size/position |
-| `tauri-plugin-dialog` | Native save-file dialog for CSV export |
+- Tauri production build (`tauri build`) — untested; needs:
+  - `cargo build --release` in `src-tauri/`
+  - Verify SQLite migrations run correctly on first launch
+  - Verify `handai.db` is created in `app_data_dir()`
+  - Code signing for macOS distribution
+- GitHub Actions CI for Tauri builds
 
 ---
 
 ## Key Decisions Made
 
-1. **Tauri CSV via native dialog** — WKWebView (macOS system WebView) does not support the HTML `download` attribute. Blob URL anchor clicks silently fail. Solution: detect `window.__TAURI_INTERNALS__` and invoke `save_file` command which calls `blocking_save_file()` from tauri-plugin-dialog. Falls back to blob URL in browser.
+1. **`build:tauri` shell script exclusion** — Next.js `output: 'export'` cannot handle any dynamic routes or API handlers. Shell trap approach: temporarily move `src/app/api/` + `src/app/history/[id]/page.tsx` before building, restore on EXIT regardless of outcome. Cleaner than maintaining two separate Next.js configs.
 
-2. **`downloadCSV` async** — Making it async allows dynamic import of `@tauri-apps/api/core` only when in Tauri context (no bundle impact in browser build). All callers use `void downloadCSV(...)`.
+2. **`history/[id]` handled via search params in Tauri** — `generateStaticParams() { return [] }` is treated as "missing" by Next.js export (empty array = no pages). Solution: exclude `[id]/page.tsx` from Tauri build, show detail view inline in `history/page.tsx` via `?id=uuid`. Web deployment keeps the full `/history/[id]` route.
 
-3. **Session bar placement** — Moved below Next button so the coding flow is uninterrupted: text → codes → Next → then session management + export. Cleaner hierarchy.
+3. **`useSearchParams` needs Suspense** — Added `<Suspense>` wrapper to `history/page.tsx` with a loading spinner fallback. The actual logic is in `HistoryContent` which uses `useSearchParams()`.
 
-4. **Window state auto-restore** — `tauri-plugin-window-state` restores on plugin init; no manual `restore_window_state` call needed (method doesn't exist in Tauri 2 API).
+4. **`isTauri` in list links** — Changed history list from `<Link href="/history/uuid">` to `div onClick={() => router.push(isTauri ? '/history?id=uuid' : '/history/uuid')}`. `isTauri` is detected in `useEffect` (not module level) to avoid hydration mismatch.
+
+5. **`generateStaticParams` must be server component** — Cannot appear in a `"use client"` file. Split `[id]/page.tsx` into a server wrapper (`page.tsx`) + `RunDetailClient.tsx` (client component). The server wrapper is excluded from Tauri build; the client component is importable from `history/page.tsx`.
 
 ---
 
 ## Open Issues
 
-1. **Tauri Node sidecar binary** — must be manually placed at `src-tauri/binaries/node-{target-triple}` per platform. See `desktop/README.md`.
-2. **Tauri production DB path** — fixed in code (`DATABASE_URL` → app data dir), but untested until `tauri build` is run.
-3. **Electron DB path** — still uses CWD; should pass `DATABASE_URL=file://${app.getPath('userData')}/handai.db`.
-4. **Phase B Tauri migration** — no sidecar needed, ~10 MB bundle. See ARCHITECTURE.md for plan.
-5. **Electron end-to-end** — code written but never run: `cd web/desktop/electron && npm install && npm start`.
-6. **`allowedDevOrigins` warning** — Next.js 16 cross-origin warning from Tauri dev (127.0.0.1 → localhost:3000). Cosmetic only; fix by adding to `next.config.ts`.
+1. **Tauri production build untested** — `cargo build --release` + `tauri build` not yet run. SQLite migration correctness unverified in production bundle.
+2. **CORS for Anthropic/Google in Tauri WebView** — AI SDK calls go directly from WKWebView to API endpoints. Anthropic and Google may block requests without `Origin: tauri://localhost` in CORS allowlist. If they do, add `tauri-plugin-http` for those providers only.
+3. **`pdfjs-dist` worker URL in static export** — `new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url)` relies on webpack/turbopack asset resolution. Verify it copies the worker file to `out/_next/static/` correctly.
+4. **`dynamic = 'force-dynamic'` on API routes** — Added during troubleshooting to 8 API route files. These are NOT needed for web build (Next.js already infers dynamic from use of request/headers). Remove them if they cause issues.
 
 ---
 
 ## Next Steps (Prioritized)
 
-1. **Fix `allowedDevOrigins`** in `next.config.ts` — 1-liner to silence the cross-origin warning in Tauri dev
-2. **Test Electron end-to-end** — `cd web/desktop/electron && npm install && npm start`
-3. **Electron DB path** — pass `DATABASE_URL` in `main.js` spawn env
-4. **Tauri production build** — download Node binary → `tauri build` → verify DB, CSV export, all routes
-5. **GitHub Actions** — CI matrix for Electron (mac/win/linux)
-6. **Phase B Tauri** — move 6 LLM routes to browser fetch → eliminate sidecar
+1. **Test `tauri dev`** — `cd web/desktop/tauri && npm run tauri dev` — verify LLM calls work from WebView, history DB works, local model detection works
+2. **Run `tauri build`** — verify production bundle, SQLite DB creation, CSV export
+3. **CORS check** — Test Anthropic + Google providers in Tauri; add `tauri-plugin-http` if blocked
+4. **Remove force-dynamic exports** from API routes if not needed (8 files)
+5. **GitHub Actions** — CI for Tauri builds (macOS target)
 
 ---
 
@@ -88,13 +100,19 @@
 node 22, npm 10
 Next.js 16.1.6, React 19, TypeScript strict
 Tailwind v4, shadcn/ui
-Prisma 6 + SQLite
+Prisma 6 + SQLite (web deployment only)
 Vitest (76 tests)
 
-# Tauri
+# Tauri Phase B
 Rust stable 1.77+
-tauri 2, tauri-plugin-shell 2, tauri-plugin-window-state 2, tauri-plugin-dialog 2
-@tauri-apps/api (installed in web/)
+tauri 2, tauri-plugin-sql 2 (sqlite), tauri-plugin-window-state 2, tauri-plugin-dialog 2
+@tauri-apps/api, @tauri-apps/plugin-sql (installed in web/)
+pdfjs-dist, mammoth (browser builds)
+
+# Builds
+npm run build        → web standalone
+npm run build:tauri  → out/ static export for Tauri
+npm run tauri dev    → run from web/desktop/tauri/
 
 # Git
 web/ remote: https://github.com/mohsaqr/handai_refactored.git branch main

@@ -157,8 +157,27 @@ function useLocalProviderDetection() {
     const { providers, setProviderConfig } = useAppStore();
 
     React.useEffect(() => {
-        fetch("/api/local-models")
-            .then((r) => r.json())
+        const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+        const fetchDetected = isTauri
+            ? // In Tauri (no API routes): probe Ollama and LM Studio directly from the browser.
+              // The desktop WebView has no CORS restrictions for localhost requests.
+              Promise.all([
+                  fetch("http://localhost:11434/api/tags").then((r) => r.json()).catch(() => null),
+                  fetch("http://localhost:1234/v1/models").then((r) => r.json()).catch(() => null),
+              ]).then(([ollama, lm]) => {
+                  const result: Record<string, string[]> = {};
+                  if (ollama?.models) {
+                      result.ollama = (ollama.models as { name: string }[]).map((m) => m.name);
+                  }
+                  if (lm?.data) {
+                      result.lmstudio = (lm.data as { id: string }[]).map((m) => m.id);
+                  }
+                  return result;
+              })
+            : fetch("/api/local-models").then((r) => r.json());
+
+        fetchDetected
             .then((detected: Record<string, string[]>) => {
                 for (const [provider, models] of Object.entries(detected)) {
                     if (!models.length) continue;
@@ -187,7 +206,7 @@ function useLocalProviderDetection() {
             })
             .catch(() => {}); // silent if not running
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []); // run once on mount
+    }, []); // run once on mount — isTauri is stable
 }
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
