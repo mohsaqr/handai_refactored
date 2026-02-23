@@ -1,8 +1,32 @@
-# Handai AI Data Suite
+# Handai AI Data Suite — Web App (JavaScript)
 
 A qualitative and quantitative data analysis suite powered by large language models. Runs as a web app or as a native desktop application (Tauri, ~10 MB) — no code changes between the two targets.
 
 Built with Next.js 16, React 19, TypeScript, and Tailwind CSS v4.
+
+---
+
+## Two Versions of Handai
+
+Handai ships in two completely independent versions that share the same tools and LLM providers but are built on different technology stacks. **This repository is the JavaScript/Next.js version.**
+
+| | **Handai Web** (this repo) | **Handai Streamlit** |
+|---|---|---|
+| **Stack** | Next.js 16, React 19, TypeScript | Python, Streamlit |
+| **Repo** | [mohsaqr/handai_refactored](https://github.com/mohsaqr/handai_refactored) | [mohsaqr/handai](https://github.com/mohsaqr/handai) |
+| **Run** | `npm install && npm run dev` → :3000 | `pip install -r requirements.txt && streamlit run app.py` → :8501 |
+| **Desktop app** | Tauri (~10 MB native, instant launch) | Electron wrapper |
+| **Run history** | SQLite DB, History page, per-row drill-down | — |
+| **Web deploy** | Vercel / Docker / any Node host | — |
+| **Best for** | Teams, web deployment, production, non-Python users | Python users, quick local analysis |
+| **Tools** | All 11 tools | All 11 tools |
+| **Providers** | All 10 providers | All 10 providers |
+
+**Choose Handai Web if you** want to deploy it for a team, want the Tauri desktop app, prefer TypeScript/React, or need run history and CSV export from past sessions.
+
+**Choose Handai Streamlit if you** are already in the Python ecosystem, want the simplest possible local setup, or prefer Streamlit's single-file script approach.
+
+Both versions are fully independent — you do not need to install or run both.
 
 ---
 
