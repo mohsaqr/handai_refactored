@@ -20,6 +20,7 @@ tauri                    = { version = "2", features = ["tray-icon"] }
 tauri-plugin-sql         = { version = "2", features = ["sqlite"] }  # SQLite DB (replaces Prisma sidecar)
 tauri-plugin-window-state = "2"         # persist window size/position
 tauri-plugin-dialog      = "2"          # native save-file dialog for CSV export
+tauri-plugin-cors-fetch  = "5"          # route fetch() through Rust HTTP — fixes CORS for Anthropic/Google in WKWebView
 serde                    = { version = "1", features = ["derive"] }
 serde_json               = "1"
 

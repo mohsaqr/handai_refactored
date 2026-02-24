@@ -116,6 +116,7 @@ fn main() {
         )
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_cors_fetch::init())
         .setup(|app| {
             // Resolve app data dir so tauri-plugin-sql writes the DB to a
             // writable location instead of the app bundle directory.
