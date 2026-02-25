@@ -186,6 +186,25 @@ IMPORTANT:
 - Use null for missing or unknown values`,
   },
 
+  // ── Abstract Screener ──────────────────────────────────────────────
+  "screener.default": {
+    id: "screener.default",
+    name: "Screener — Default",
+    category: "screener",
+    defaultValue: `You are a systematic review screener. Apply the criteria below to decide if this abstract should be included or excluded.
+
+CRITERIA:
+{criteria}
+
+Return ONLY valid JSON (no markdown, no prose):
+{"decision":"include","confidence":0.92,"reasoning":"one sentence","highlight_terms":["term1","term2"]}
+
+- decision: "include" or "exclude"
+- confidence: 0.0–1.0 how certain you are
+- reasoning: one sentence explaining the key reason
+- highlight_terms: 3–8 words or short phrases from the abstract that most influenced your decision`,
+  },
+
   // ── AI Coder ───────────────────────────────────────────────────────
   "ai_coder.suggestions": {
     id: "ai_coder.suggestions",

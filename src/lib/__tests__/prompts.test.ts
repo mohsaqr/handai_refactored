@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { PROMPTS, getPrompt, getPromptsByCategory } from '../prompts';
 
 describe('PROMPTS registry', () => {
-  it('contains all 15 expected prompt IDs', () => {
+  it('contains all 16 expected prompt IDs', () => {
     const expectedIds = [
       'transform.default',
       'qualitative.default',
@@ -19,11 +19,12 @@ describe('PROMPTS registry', () => {
       'generate.csv_freeform',
       'automator.rules',
       'ai_coder.suggestions',
+      'screener.default',
     ];
     for (const id of expectedIds) {
       expect(PROMPTS[id], `Missing prompt: ${id}`).toBeDefined();
     }
-    expect(Object.keys(PROMPTS)).toHaveLength(15);
+    expect(Object.keys(PROMPTS)).toHaveLength(16);
   });
 
   it('each entry has id matching its key', () => {
@@ -78,6 +79,12 @@ describe('getPromptsByCategory', () => {
     expect(prompts).toHaveLength(1);
   });
 
+  it('returns 1 screener prompt', () => {
+    const prompts = getPromptsByCategory('screener');
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].id).toBe('screener.default');
+  });
+
   it('returns empty array for unknown category', () => {
     expect(getPromptsByCategory('nonexistent')).toEqual([]);
   });
@@ -94,7 +101,7 @@ describe('getPrompt', () => {
     expect(getPrompt('does.not.exist')).toBe('');
   });
 
-  it('returns non-empty strings for all 15 registered prompts', () => {
+  it('returns non-empty strings for all 16 registered prompts', () => {
     for (const id of Object.keys(PROMPTS)) {
       expect(getPrompt(id).length, `Empty prompt for: ${id}`).toBeGreaterThan(0);
     }

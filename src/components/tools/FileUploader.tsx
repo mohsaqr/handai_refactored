@@ -7,6 +7,7 @@ import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { parseRis } from "@/lib/ris-parser";
 
 interface FileUploaderProps {
     onDataLoaded: (data: any[], fileName: string) => void;
@@ -57,6 +58,15 @@ export function FileUploader({ onDataLoaded, accept }: FileUploaderProps) {
                     const data = JSON.parse(result as string);
                     onDataLoaded(Array.isArray(data) ? data : [data], file.name);
                     setIsProcessing(false);
+                } else if (fileExt === "ris") {
+                    const rows = parseRis(result as string);
+                    if (rows.length === 0) {
+                        setError("No valid records found in RIS file");
+                        setIsProcessing(false);
+                        return;
+                    }
+                    onDataLoaded(rows, file.name);
+                    setIsProcessing(false);
                 }
             } catch (err: any) {
                 setError(`Failed to process file: ${err.message}`);
@@ -78,6 +88,8 @@ export function FileUploader({ onDataLoaded, accept }: FileUploaderProps) {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
             "application/vnd.ms-excel": [".xls"],
             "application/json": [".json"],
+            "application/x-research-info-systems": [".ris"],
+            "text/plain": [".ris"],
         },
         multiple: false,
     });
@@ -99,7 +111,7 @@ export function FileUploader({ onDataLoaded, accept }: FileUploaderProps) {
                             {isDragActive ? "Drop the file here" : "Click or drag file to upload"}
                         </p>
                         <p className="text-xs text-muted-foreground">
-                            Support for CSV, Excel, and JSON files
+                            Support for CSV, Excel, JSON, and RIS files
                         </p>
                     </div>
                     {isProcessing && (
