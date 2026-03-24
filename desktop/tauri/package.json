@@ -1,0 +1,15 @@
+{
+  "name": "handai-web-tauri",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Handai AI Data Suite — Tauri desktop wrapper for the Next.js web app",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:web": "cd ../.. && npm run build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
