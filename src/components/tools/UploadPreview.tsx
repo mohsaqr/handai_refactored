@@ -3,7 +3,7 @@
 import React from "react";
 import { FileUploader } from "./FileUploader";
 import { SampleDatasetPicker } from "./SampleDatasetPicker";
-import { DataTable } from "./DataTable";
+import { DataTable, ExportDropdown } from "./DataTable";
 import { CheckCircle2 } from "lucide-react";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { toast } from "sonner";
@@ -67,11 +67,9 @@ export function UploadPreview({
             {bannerExtra}
           </div>
           <div className="border border-gray-300 overflow-hidden">
-            <div className="px-4 py-2.5 border-b border-gray-300 bg-gray-50 text-sm font-medium flex justify-between">
-              <span>Data Preview</span>
-              <span className="text-xs text-muted-foreground font-normal">
-                {data.length} rows
-              </span>
+            <div className="px-4 py-2.5 border-b border-gray-300 bg-gray-50 text-sm font-medium flex items-center justify-between">
+              <span>Data Preview — {data.length} rows</span>
+              <ExportDropdown data={data} filename="preview" />
             </div>
             <DataTable data={data} />
           </div>

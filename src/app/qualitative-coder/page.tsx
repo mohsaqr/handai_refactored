@@ -130,19 +130,9 @@ export default function QualitativeCoderPage() {
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
   const { selectedCols, toggleCol, toggleAll } = useColumnSelection(allColumns, false);
 
-  // Load codebook from localStorage
   useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(CODEBOOK_KEY) || "[]");
-      if (Array.isArray(saved) && saved.length > 0) setCodebook(saved);
-    } catch {}
     setIsMounted(true);
   }, []);
-
-  useEffect(() => {
-    if (!isMounted) return;
-    localStorage.setItem(CODEBOOK_KEY, JSON.stringify(codebook));
-  }, [codebook, isMounted]);
 
   const buildAutoInstructions = useCallback(() => {
     const lines: string[] = [];
@@ -224,6 +214,7 @@ export default function QualitativeCoderPage() {
   const handleDataLoaded = (newData: Row[], name: string) => {
     setData(newData);
     setDataName(name);
+    setCodebook([]);
     batch.clearResults();
     toast.success(`Loaded ${newData.length} rows from ${name}`);
   };

@@ -6,10 +6,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useAppStore } from "@/lib/store";
 import { useSystemSettings } from "@/lib/hooks";
-import { Loader2, ChevronDown, ChevronRight, HelpCircle, ExternalLink } from "lucide-react";
+import { Loader2, HelpCircle, ExternalLink, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import pLimit from "p-limit";
 import Link from "next/link";
@@ -18,21 +17,22 @@ import { dispatchCreateRun, dispatchSaveResults, dispatchConsensusRow } from "@/
 import { UploadPreview } from "@/components/tools/UploadPreview";
 import { ColumnSelector } from "@/components/tools/ColumnSelector";
 import { useColumnSelection } from "@/hooks/useColumnSelection";
-import { DataTable } from "@/components/tools/DataTable";
+import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 
 type RunMode = "preview" | "test" | "full";
 
-const DEFAULT_WORKER_PROMPT = `Apply the given instructions to the data. Return ONLY the requested values.
+const DEFAULT_WORKER_PROMPT = `Apply the given instructions to the data. Return ONLY the direct answer — nothing else.
 
-RULES:
-- Plain text or CSV only. NEVER use markdown: no **, no ## headings, no bullet points, no code blocks, no backticks
-- Do NOT explain, justify, or describe your reasoning
-- Do NOT add headers, labels, or introductions
-- Do NOT add extra text beyond what was asked
-- Be short and precise — output the values only, nothing else`;
+STRICT RULES:
+- Output ONLY the answer to the instruction. No notes, no explanations, no reasoning, no commentary, no caveats.
+- Plain text or CSV only. NEVER use markdown: no **, no ## headings, no bullet points, no code blocks, no backticks.
+- Do NOT add headers, labels, introductions, or sign-offs.
+- Do NOT prefix with "Answer:", "Result:", "Note:", or any label.
+- Do NOT add extra sentences, context, or qualifications.
+- If the instruction asks for a single value, return that value and NOTHING else.`;
 
 const DEFAULT_JUDGE_PROMPT = `Synthesize worker responses into one best answer.
 
@@ -41,6 +41,13 @@ RULES:
 - Do NOT add headers or labels
 - Pick the most accurate values and output them directly
 - You may add a brief reason for your choice, but keep it to one short sentence maximum`;
+
+const SAMPLE_JUDGE_PROMPTS: Record<string, string> = {
+  "Strict consensus": `Only accept a result if ALL workers agree. If any worker disagrees, flag the row as "DISAGREEMENT" and do not pick a winner.\n\nRULES:\n- Plain text only, no markdown\n- Output the agreed answer, or "DISAGREEMENT" if workers differ\n- Do NOT add headers or labels`,
+  "Majority vote": `Pick the answer that the majority of workers agree on. If there is a tie, pick the answer from the highest-ranked worker.\n\nRULES:\n- Plain text only, no markdown\n- Output the majority answer directly\n- If tied, prefer Worker 1's answer\n- Add one sentence explaining the vote count`,
+  "Best quality pick": `Evaluate each worker's output for accuracy, completeness, and clarity. Pick the single best response.\n\nRULES:\n- Plain text only, no markdown\n- Output the best answer directly\n- Add one sentence explaining why you chose it\n- Penalize vague, incomplete, or off-topic answers`,
+  "Synthesize all": `Combine the best parts of all worker outputs into one comprehensive answer.\n\nRULES:\n- Plain text only, no markdown\n- Merge insights from all workers into a single coherent response\n- Do not simply copy one worker — synthesize\n- Keep the output concise and well-structured`,
+};
 
 interface WorkerConfig {
   providerId: string;
@@ -112,8 +119,7 @@ export default function ConsensusCoderPage() {
   const abortRef = useRef(false);
   const startedAtRef = useRef<number>(0);
 
-  const [judgeOpen, setJudgeOpen] = useState(true);
-  const [worker3Enabled, setWorker3Enabled] = useState(false);
+  const [extraWorkers, setExtraWorkers] = useState<WorkerConfig[]>([]);
   const [includeJudgeReasoning, setIncludeJudgeReasoning] = useState(true);
   const [enableQualityScoring, setEnableQualityScoring] = useState(false);
   const [enableDisagreementAnalysis, setEnableDisagreementAnalysis] = useState(false);
@@ -128,8 +134,11 @@ export default function ConsensusCoderPage() {
 
   const [worker1, setWorker1] = useState<WorkerConfig>({ providerId: firstId, model: firstModel });
   const [worker2, setWorker2] = useState<WorkerConfig>({ providerId: secondId, model: secondModel });
-  const [worker3, setWorker3] = useState<WorkerConfig>({ providerId: firstId, model: firstModel });
   const [judge, setJudge] = useState<WorkerConfig>({ providerId: firstId, model: firstModel });
+
+  const addWorker = () => setExtraWorkers((prev) => [...prev, { providerId: firstId, model: firstModel }]);
+  const removeWorker = (idx: number) => setExtraWorkers((prev) => prev.filter((_, i) => i !== idx));
+  const updateExtraWorker = (idx: number, cfg: WorkerConfig) => setExtraWorkers((prev) => prev.map((w, i) => (i === idx ? cfg : w)));
 
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
   const { selectedCols, toggleCol, toggleAll } = useColumnSelection(allColumns, false);
@@ -187,16 +196,18 @@ export default function ConsensusCoderPage() {
 
     const p1 = providers[worker1.providerId];
     const p2 = providers[worker2.providerId];
-    const p3 = worker3Enabled ? providers[worker3.providerId] : null;
     const pJ = providers[judge.providerId];
 
     if (!p1 || !p2 || !pJ) return toast.error("Invalid provider selection");
-    if (worker3Enabled && !p3) return toast.error("Invalid Worker 3 provider");
+    for (let i = 0; i < extraWorkers.length; i++) {
+      const ep = providers[extraWorkers[i].providerId];
+      if (!ep) return toast.error(`Invalid Worker ${i + 3} provider`);
+      if (!ep.isLocal && !ep.apiKey) return toast.error(`API key missing for Worker ${i + 3}. Check Settings.`);
+    }
     if (
       (!p1.isLocal && !p1.apiKey) ||
       (!p2.isLocal && !p2.apiKey) ||
-      (!pJ.isLocal && !pJ.apiKey) ||
-      (worker3Enabled && p3 && !p3.isLocal && !p3.apiKey)
+      (!pJ.isLocal && !pJ.apiKey)
     ) {
       return toast.error("API keys missing. Check Settings.");
     }
@@ -233,7 +244,10 @@ export default function ConsensusCoderPage() {
     const workers = [
       { provider: worker1.providerId, model: worker1.model, apiKey: p1.apiKey || "local", baseUrl: p1.baseUrl },
       { provider: worker2.providerId, model: worker2.model, apiKey: p2.apiKey || "local", baseUrl: p2.baseUrl },
-      ...(worker3Enabled && p3 ? [{ provider: worker3.providerId, model: worker3.model, apiKey: p3.apiKey || "local", baseUrl: p3.baseUrl }] : []),
+      ...extraWorkers.map((ew) => {
+        const ep = providers[ew.providerId];
+        return { provider: ew.providerId, model: ew.model, apiKey: ep?.apiKey || "local", baseUrl: ep?.baseUrl };
+      }),
     ];
 
     const tasks = targetData.map((row, idx) =>
@@ -390,61 +404,32 @@ export default function ConsensusCoderPage() {
             <WorkerCard label="Worker 2" cfg={worker2} setCfg={setWorker2} enabledProviders={enabledProviders} />
           </div>
 
-          {worker3Enabled && (
-            <div className="border-t pt-5">
+          {extraWorkers.map((ew, idx) => (
+            <div key={idx} className="border-t pt-5">
               <div className="grid grid-cols-2 gap-8">
-                <WorkerCard label="Worker 3" cfg={worker3} setCfg={setWorker3} enabledProviders={enabledProviders} />
+                <div className="relative">
+                  <WorkerCard label={`Worker ${idx + 3}`} cfg={ew} setCfg={(cfg) => updateExtraWorker(idx, cfg)} enabledProviders={enabledProviders} />
+                  <button
+                    onClick={() => removeWorker(idx)}
+                    className="absolute top-0 right-0 text-muted-foreground hover:text-destructive"
+                    title={`Remove Worker ${idx + 3}`}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
                 <div />
               </div>
             </div>
-          )}
+          ))}
 
-          <label className="flex items-center gap-2 cursor-pointer pt-1">
-            <input
-              type="checkbox"
-              checked={worker3Enabled}
-              onChange={(e) => setWorker3Enabled(e.target.checked)}
-              className="accent-primary w-4 h-4"
-            />
-            <span className="text-sm">Enable Worker 3</span>
-          </label>
+          <Button variant="outline" size="sm" className="text-xs" onClick={addWorker}>
+            <Plus className="h-3.5 w-3.5 mr-1.5" /> Add Worker
+          </Button>
+
+          <div className="border-t pt-5">
+            <WorkerCard label="Judge" cfg={judge} setCfg={setJudge} enabledProviders={enabledProviders} />
+          </div>
         </div>
-
-        <Collapsible open={judgeOpen} onOpenChange={setJudgeOpen}>
-          <CollapsibleTrigger className="flex items-center gap-2 w-full px-4 py-3 border rounded-lg hover:bg-muted/20 transition-colors">
-            {judgeOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-            <span className="font-semibold text-sm">Judge</span>
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            <div className="border border-t-0 rounded-b-lg p-5 space-y-3">
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Provider</Label>
-                <Select value={judge.providerId} onValueChange={(v) => setJudge({ ...judge, providerId: v })}>
-                  <SelectTrigger className="text-sm"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {enabledProviders.map((p) => (
-                      <SelectItem key={p.providerId} value={p.providerId} className="text-sm">
-                        {providerLabel(p.providerId)}
-                      </SelectItem>
-                    ))}
-                    {enabledProviders.length === 0 && (
-                      <SelectItem value={judge.providerId} className="text-sm">No providers configured</SelectItem>
-                    )}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Model</Label>
-                <Input
-                  value={judge.model}
-                  onChange={(e) => setJudge({ ...judge, model: e.target.value })}
-                  placeholder="Model ID (e.g. gpt-4o)"
-                  className="text-sm font-mono"
-                />
-              </div>
-            </div>
-          </CollapsibleContent>
-        </Collapsible>
       </div>
 
       <div className="border-t" />
@@ -455,33 +440,49 @@ export default function ConsensusCoderPage() {
 
         <div className="grid grid-cols-2 gap-6">
           <div className="space-y-2">
-            <Label className="text-sm">Worker Instructions</Label>
+            <div className="flex items-center justify-between h-7">
+              <Label className="text-sm">🔧 Worker Instructions</Label>
+            </div>
             <Textarea value={workerPrompt} onChange={(e) => setWorkerPrompt(e.target.value)} className="min-h-[200px] text-xs font-mono resize-y" />
           </div>
           <div className="space-y-2">
-            <Label className="text-sm">Judge Instructions</Label>
+            <div className="flex items-center justify-between h-7">
+              <Label className="text-sm">⚖️ Judge Instructions</Label>
+              <Select onValueChange={(key) => { if (SAMPLE_JUDGE_PROMPTS[key]) setJudgePrompt(SAMPLE_JUDGE_PROMPTS[key]); }}>
+                <SelectTrigger className="w-[160px] h-7 text-xs">
+                  <SelectValue placeholder="Load sample..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.keys(SAMPLE_JUDGE_PROMPTS).map((key) => (
+                    <SelectItem key={key} value={key} className="text-xs">{key}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <Textarea value={judgePrompt} onChange={(e) => setJudgePrompt(e.target.value)} className="min-h-[200px] text-xs font-mono resize-y" />
           </div>
         </div>
 
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" checked={includeJudgeReasoning} onChange={(e) => setIncludeJudgeReasoning(e.target.checked)} className="accent-primary w-4 h-4" />
-          <span className="text-sm">Include Judge Reasoning</span>
-        </label>
-
         <div className="space-y-3">
           <div className="text-sm font-bold">Enhanced Judge Features</div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-3 gap-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={includeJudgeReasoning} onChange={(e) => setIncludeJudgeReasoning(e.target.checked)} className="accent-primary w-4 h-4" />
+              <span className="text-sm">Include Judge Reasoning</span>
+              <span title="Adds a column with the judge's reasoning for its choice">
+                <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
+              </span>
+            </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" checked={enableQualityScoring} onChange={(e) => setEnableQualityScoring(e.target.checked)} className="accent-primary w-4 h-4" />
-              <span className="text-sm">Enable Quality Scoring</span>
+              <span className="text-sm">Quality Scoring</span>
               <span title="Judge assigns a quality score to each worker output">
                 <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
               </span>
             </label>
             <label className="flex items-center gap-2 cursor-pointer">
               <input type="checkbox" checked={enableDisagreementAnalysis} onChange={(e) => setEnableDisagreementAnalysis(e.target.checked)} className="accent-primary w-4 h-4" />
-              <span className="text-sm">Enable Disagreement Analysis</span>
+              <span className="text-sm">Disagreement Analysis</span>
               <span title="Adds a column explaining why workers disagreed">
                 <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
               </span>
@@ -595,6 +596,10 @@ export default function ConsensusCoderPage() {
           )}
 
           <div className="border rounded-lg overflow-hidden">
+            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between">
+              <span>Results — {results.length} rows</span>
+              <ExportDropdown data={results} filename="consensus_results" />
+            </div>
             <DataTable data={results} showAll />
           </div>
         </div>

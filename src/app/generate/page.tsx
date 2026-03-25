@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
-import { DataTable } from "@/components/tools/DataTable";
+import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -90,6 +90,7 @@ export default function GeneratePage() {
   const [suggestedFields, setSuggestedFields] = useState<SuggestedField[]>([]);
   const [isSuggesting, setIsSuggesting] = useState(false);
   const [suggestionMode, setSuggestionMode] = useState<"ai" | "manual">("ai");
+  const [hasSuggestedOnce, setHasSuggestedOnce] = useState(false);
 
   const temperature = VARIATION_LEVELS[variationIdx].value;
 
@@ -188,6 +189,7 @@ export default function GeneratePage() {
         checked: true,
       }));
       setSuggestedFields(fields);
+      setHasSuggestedOnce(true);
       toast.success(`${fields.length} fields suggested`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -349,7 +351,7 @@ export default function GeneratePage() {
               variant={suggestionMode === "ai" ? "default" : "outline"}
               size="sm"
               className="text-xs"
-              onClick={() => { setSuggestionMode("ai"); suggestFields(); }}
+              onClick={() => { setSuggestionMode("ai"); if (!hasSuggestedOnce) suggestFields(); }}
             >
               <Sparkles className="h-3.5 w-3.5 mr-1.5" />
               AI Mode
@@ -364,6 +366,18 @@ export default function GeneratePage() {
               Manual Mode
             </Button>
           </div>
+          {suggestionMode === "ai" && hasSuggestedOnce && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              onClick={suggestFields}
+              disabled={isSuggesting}
+            >
+              {isSuggesting ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />}
+              Refresh AI
+            </Button>
+          )}
 
           {/* AI mode content */}
           {suggestionMode === "ai" && (
@@ -589,21 +603,18 @@ export default function GeneratePage() {
                 className="w-full accent-primary"
               />
               <div className="flex justify-between text-[11px] text-muted-foreground">
-                <span>Low</span>
-                <span>Maximum</span>
+                <span>Low (temp 0.3)</span>
+                <span>Medium (temp 0.6)</span>
+                <span>High (temp 0.9)</span>
+                <span>Maximum (temp 1.0)</span>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Info / warning box */}
-        {!canGenerate ? null : !activeModel ? (
+        {/* No model warning */}
+        {canGenerate && !activeModel && (
           <NoModelWarning activeModel={activeModel} />
-        ) : (
-          <div className="px-4 py-3 rounded-lg bg-muted/30 border text-xs text-muted-foreground">
-            Ready to generate {rowCount} rows using <strong>{activeModel.providerId} / {activeModel.defaultModel}</strong>
-            {" "} · Variation: <strong>{VARIATION_LEVELS[variationIdx].label}</strong> (temp {temperature})
-          </div>
         )}
       </div>
 
@@ -673,16 +684,6 @@ export default function GeneratePage() {
                   View in History
                 </Link>
               )}
-              {generatedData.length > 0 && outputFormat === "excel" && (
-                <Button variant="outline" size="sm" onClick={exportXlsx}>
-                  <Download className="h-3.5 w-3.5 mr-1.5" /> Export XLSX
-                </Button>
-              )}
-              {generatedData.length > 0 && outputFormat !== "excel" && (
-                <Button variant="outline" size="sm" onClick={exportCsv}>
-                  <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
-                </Button>
-              )}
               {generatedRaw && outputFormat !== "tabular" && (
                 <Button variant="outline" size="sm" onClick={() => {
                   const ext = outputFormat === "json" ? "json" : "txt";
@@ -699,6 +700,10 @@ export default function GeneratePage() {
 
           {generatedData.length > 0 ? (
             <div className="border rounded-lg overflow-hidden">
+              <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between">
+                <span>Generated Data — {generatedData.length} rows</span>
+                <ExportDropdown data={generatedData} filename="generated_data" />
+              </div>
               <DataTable data={generatedData} showAll />
             </div>
           ) : (

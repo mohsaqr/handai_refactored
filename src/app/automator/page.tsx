@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { UploadPreview } from "@/components/tools/UploadPreview";
 import { NoModelWarning } from "@/components/tools/NoModelWarning";
-import { DataTable } from "@/components/tools/DataTable";
+import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -522,8 +522,9 @@ export default function AutomatorPage() {
             </div>
           </div>
           <div className="border rounded-lg overflow-hidden">
-            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">
-              Pipeline Output — {results.length} rows
+            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between">
+              <span>Pipeline Output — {results.length} rows</span>
+              <ExportDropdown data={results} filename="pipeline_output" />
             </div>
             <DataTable data={results} showAll />
           </div>

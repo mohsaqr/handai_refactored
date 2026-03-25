@@ -26,7 +26,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import Link from "next/link";
 import type { RunMeta } from "@/types";
-import { listRuns, deleteRun } from "@/lib/db-tauri";
+import { listRuns as tauriListRuns, deleteRun as tauriDeleteRun } from "@/lib/db-tauri";
+import { listRuns as idbListRuns, deleteRun as idbDeleteRun } from "@/lib/db-indexeddb";
 import RunDetailClient from "./[id]/RunDetailClient";
 import {
   Dialog,
@@ -58,7 +59,9 @@ function HistoryContent() {
   const router = useRouter();
   const detailId = searchParams.get("id");
 
+  const isStatic = process.env.NEXT_PUBLIC_STATIC === "1";
   const [isTauri, setIsTauri] = useState(false);
+  const useBrowserDb = isTauri || isStatic;
   const [runs, setRuns] = useState<RunMeta[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -78,8 +81,9 @@ function HistoryContent() {
     setIsRefreshing(true);
     try {
       const offset = pageNum * PAGE_SIZE;
-      if (isTauri) {
-        const data = await listRuns(PAGE_SIZE, offset);
+      if (useBrowserDb) {
+        const listFn = isTauri ? tauriListRuns : idbListRuns;
+        const data = await listFn(PAGE_SIZE, offset);
         setRuns(data.runs as RunMeta[]);
         setTotal(data.total ?? 0);
         if (data.stats) setStats(data.stats);
@@ -107,7 +111,7 @@ function HistoryContent() {
   useEffect(() => {
     fetchRuns(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isTauri]);
+  }, [isTauri, isStatic]);
 
   const uniqueProviders = [...new Set(runs.map((r) => r.provider).filter(Boolean))].sort();
 
@@ -128,8 +132,9 @@ function HistoryContent() {
     if (!confirmDeleteId) return;
     setIsDeleting(true);
     try {
-      if (isTauri) {
-        const result = await deleteRun(confirmDeleteId);
+      if (useBrowserDb) {
+        const deleteFn = isTauri ? tauriDeleteRun : idbDeleteRun;
+        const result = await deleteFn(confirmDeleteId);
         if (!result.ok) throw new Error("Delete failed");
       } else {
         const res = await fetch(`/api/runs/${confirmDeleteId}`, { method: "DELETE" });
@@ -147,7 +152,7 @@ function HistoryContent() {
   };
 
   const navigateToDetail = (id: string) => {
-    if (isTauri) {
+    if (useBrowserDb) {
       router.push(`/history?id=${id}`);
     } else {
       router.push(`/history/${id}`);

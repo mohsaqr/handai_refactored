@@ -1,12 +1,8 @@
 "use client";
 
 import React from "react";
-import { DataTable } from "./DataTable";
-import { Button } from "@/components/ui/button";
-import {
-  Download,
-  ExternalLink,
-} from "lucide-react";
+import { DataTable, ExportDropdown } from "./DataTable";
+import { ExternalLink } from "lucide-react";
 import Link from "next/link";
 
 type Row = Record<string, unknown>;
@@ -63,24 +59,15 @@ export function ResultsPanel({
             </Link>
           )}
           {extraActions}
-          {onExportCSV && (
-            <Button variant="outline" size="sm" onClick={onExportCSV}>
-              <Download className="h-4 w-4 mr-2" /> Export CSV
-            </Button>
-          )}
-          {onExportXLSX && (
-            <Button variant="outline" size="sm" onClick={onExportXLSX}>
-              <Download className="h-4 w-4 mr-2" /> Export XLSX
-            </Button>
-          )}
         </div>
       </div>
 
       {children}
 
       <div className="border border-gray-300 overflow-hidden">
-        <div className="px-4 py-2.5 border-b border-gray-300 bg-gray-50 text-sm font-medium">
-          {title} — {results.length} rows
+        <div className="px-4 py-2.5 border-b border-gray-300 bg-gray-50 text-sm font-medium flex items-center justify-between">
+          <span>{title} — {results.length} rows</span>
+          <ExportDropdown data={results as any[]} filename="results" />
         </div>
         <DataTable data={results} showAll />
       </div>

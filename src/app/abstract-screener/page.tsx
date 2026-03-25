@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import type { Row } from "@/types";
 import { cn } from "@/lib/utils";
-import { ScreenerAnalyticsDialog } from "./ScreenerAnalyticsDialog";
+import { ScreenerAnalyticsPanel } from "./ScreenerAnalyticsDialog";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -598,13 +598,6 @@ export default function AbstractScreenerPage() {
     }
 
     setAiResults(results);
-    setDecisions((prev) => {
-      const merged: Record<number, Decision> = { ...prev };
-      Object.entries(results).forEach(([idx, r]) => {
-        if (merged[Number(idx)] == null) merged[Number(idx)] = r.decision;
-      });
-      return merged;
-    });
 
     if (localRunId) {
       const resultRows = Object.entries(results).map(([idx, r]) => ({
@@ -964,11 +957,6 @@ export default function AbstractScreenerPage() {
           </button>
           {showHighlighter && (
             <div className="border-t p-3 bg-muted/5 space-y-3">
-              <p className="text-xs text-muted-foreground">
-                Words highlighted in abstracts: <span className="text-green-600 font-medium">include terms</span> in green,{" "}
-                <span className="text-red-600 font-medium">exclude terms</span> in red,{" "}
-                <span className="text-amber-600 font-medium">AI terms</span> in amber.
-              </p>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label className="text-xs font-medium text-green-700 dark:text-green-400">Include keywords</Label>
@@ -1014,6 +1002,64 @@ export default function AbstractScreenerPage() {
         {data.length > 0 && (
           <div className="space-y-3">
 
+            {/* ── AI Batch Processing (collapsible) ────────────────────── */}
+            <div className="border rounded-lg overflow-hidden">
+              <button
+                onClick={() => setShowBatchPanel((v) => !v)}
+                className="flex items-center justify-between w-full px-3 py-2 text-sm hover:bg-muted/30 transition-colors"
+              >
+                <span className="font-medium">AI Batch Processing</span>
+                <span className="text-muted-foreground text-xs">{showBatchPanel ? "▲" : "▼"}</span>
+              </button>
+              {showBatchPanel && (
+                <div className="border-t p-3 space-y-3">
+                  {!isBatching ? (
+                    <>
+                      <div className="flex items-center gap-4 text-xs">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-muted-foreground">Concurrency:</span>
+                          <Button variant="outline" size="sm" className="h-6 w-6 p-0"
+                            onClick={() => setConcurrency((c) => Math.max(1, c - 1))}>−</Button>
+                          <span className="w-5 text-center font-mono">{concurrency}</span>
+                          <Button variant="outline" size="sm" className="h-6 w-6 p-0"
+                            onClick={() => setConcurrency((c) => Math.min(20, c + 1))}>+</Button>
+                        </div>
+                        {activeModel && (
+                          <span className="text-muted-foreground">
+                            Model: <strong>{activeModel.defaultModel}</strong>
+                          </span>
+                        )}
+                      </div>
+                      <Button size="sm" disabled={!canRunAI || data.length === 0}
+                        onClick={() => void runBatch()}
+                        className="bg-orange-500 hover:bg-orange-600 text-white w-full">
+                        Run AI Batch ({totalRows} rows)
+                      </Button>
+                      {aiCount > 0 && (
+                        <p className="text-xs text-green-600">✓ AI suggestions ready for {aiCount}/{totalRows} rows</p>
+                      )}
+                    </>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <span>Processing {totalRows} rows… {batchProgress}/{totalRows}
+                          {batchErrors > 0 && <span className="text-amber-600 ml-2">({batchErrors} errors)</span>}
+                        </span>
+                        <Button variant="outline" size="sm" onClick={stopBatch}
+                          className="border-red-300 text-red-600 hover:bg-red-50">
+                          Stop
+                        </Button>
+                      </div>
+                      <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
+                        <div className="bg-orange-500 h-full transition-all duration-300 rounded-full"
+                          style={{ width: `${totalRows > 0 ? Math.round((batchProgress / totalRows) * 100) : 0}%` }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* ── Settings bar ──────────────────────────────────────────── */}
             <div className="flex items-center gap-5 flex-wrap text-sm border rounded-lg px-4 py-2.5 bg-muted/10">
               <div className="flex items-center gap-2">
@@ -1041,22 +1087,26 @@ export default function AbstractScreenerPage() {
                   [
                     { d: "include" as const, label: "✓ Include", shortcut: "y",
                       active: "bg-green-500 hover:bg-green-600 text-white border-green-500",
+                      aiHint: "bg-green-100 border-green-300 text-green-700 dark:bg-green-900/20 dark:border-green-700 dark:text-green-400",
                       inactive: "border-green-300 text-green-700 hover:bg-green-50 dark:border-green-800 dark:text-green-400 dark:hover:bg-green-950/30" },
                     { d: "maybe" as const, label: "? Maybe", shortcut: "m",
                       active: "bg-amber-500 hover:bg-amber-600 text-white border-amber-500",
+                      aiHint: "bg-amber-100 border-amber-300 text-amber-700 dark:bg-amber-900/20 dark:border-amber-700 dark:text-amber-400",
                       inactive: "border-amber-300 text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950/30" },
                     { d: "exclude" as const, label: "✗ Exclude", shortcut: "n",
                       active: "bg-red-500 hover:bg-red-600 text-white border-red-500",
+                      aiHint: "bg-red-100 border-red-300 text-red-700 dark:bg-red-900/20 dark:border-red-700 dark:text-red-400",
                       inactive: "border-red-300 text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/30" },
                   ] as const
-                ).map(({ d, label, shortcut, active, inactive }) => {
+                ).map(({ d, label, shortcut, active, aiHint, inactive }) => {
                   const isActive = currentDecision === d;
+                  const isAISuggested = !isActive && currentAI?.decision === d;
                   const conf = currentAI?.decision === d ? currentAI.confidence : null;
                   return (
                     <button key={d} onClick={() => setDecision(d)}
                       className={cn(
                         "relative border-2 rounded-lg py-3 px-4 text-sm font-medium transition-all flex flex-col items-center gap-0.5 flex-1",
-                        isActive ? active : inactive
+                        isActive ? active : isAISuggested ? aiHint : inactive
                       )}
                     >
                       <span>{label}</span>
@@ -1146,22 +1196,26 @@ export default function AbstractScreenerPage() {
                   [
                     { d: "include" as const, label: "✓ Include", shortcut: "y",
                       active: "bg-green-500 hover:bg-green-600 text-white border-green-500",
+                      aiHint: "bg-green-100 border-green-300 text-green-700 dark:bg-green-900/20 dark:border-green-700 dark:text-green-400",
                       inactive: "border-green-300 text-green-700 hover:bg-green-50 dark:border-green-800 dark:text-green-400 dark:hover:bg-green-950/30" },
                     { d: "maybe" as const, label: "? Maybe", shortcut: "m",
                       active: "bg-amber-500 hover:bg-amber-600 text-white border-amber-500",
+                      aiHint: "bg-amber-100 border-amber-300 text-amber-700 dark:bg-amber-900/20 dark:border-amber-700 dark:text-amber-400",
                       inactive: "border-amber-300 text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950/30" },
                     { d: "exclude" as const, label: "✗ Exclude", shortcut: "n",
                       active: "bg-red-500 hover:bg-red-600 text-white border-red-500",
+                      aiHint: "bg-red-100 border-red-300 text-red-700 dark:bg-red-900/20 dark:border-red-700 dark:text-red-400",
                       inactive: "border-red-300 text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/30" },
                   ] as const
-                ).map(({ d, label, shortcut, active, inactive }) => {
+                ).map(({ d, label, shortcut, active, aiHint, inactive }) => {
                   const isActive = currentDecision === d;
+                  const isAISuggested = !isActive && currentAI?.decision === d;
                   const conf = currentAI?.decision === d ? currentAI.confidence : null;
                   return (
                     <button key={d} onClick={() => setDecision(d)}
                       className={cn(
                         "relative border-2 rounded-lg py-3 px-4 text-sm font-medium transition-all flex flex-col items-center gap-0.5 flex-1",
-                        isActive ? active : inactive
+                        isActive ? active : isAISuggested ? aiHint : inactive
                       )}
                     >
                       <span>{label}</span>
@@ -1188,64 +1242,6 @@ export default function AbstractScreenerPage() {
                 </Button>
               </div>
             )}
-
-            {/* ── AI Batch Processing (collapsible) ────────────────────── */}
-            <div className="border rounded-lg overflow-hidden">
-              <button
-                onClick={() => setShowBatchPanel((v) => !v)}
-                className="flex items-center justify-between w-full px-3 py-2 text-sm hover:bg-muted/30 transition-colors"
-              >
-                <span className="font-medium">AI Batch Processing</span>
-                <span className="text-muted-foreground text-xs">{showBatchPanel ? "▲" : "▼"}</span>
-              </button>
-              {showBatchPanel && (
-                <div className="border-t p-3 space-y-3">
-                  {!isBatching ? (
-                    <>
-                      <div className="flex items-center gap-4 text-xs">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-muted-foreground">Concurrency:</span>
-                          <Button variant="outline" size="sm" className="h-6 w-6 p-0"
-                            onClick={() => setConcurrency((c) => Math.max(1, c - 1))}>−</Button>
-                          <span className="w-5 text-center font-mono">{concurrency}</span>
-                          <Button variant="outline" size="sm" className="h-6 w-6 p-0"
-                            onClick={() => setConcurrency((c) => Math.min(20, c + 1))}>+</Button>
-                        </div>
-                        {activeModel && (
-                          <span className="text-muted-foreground">
-                            Model: <strong>{activeModel.defaultModel}</strong>
-                          </span>
-                        )}
-                      </div>
-                      <Button size="sm" disabled={!canRunAI || data.length === 0}
-                        onClick={() => void runBatch()}
-                        className="bg-orange-500 hover:bg-orange-600 text-white w-full">
-                        Run AI Batch ({totalRows} rows)
-                      </Button>
-                      {aiCount > 0 && (
-                        <p className="text-xs text-green-600">✓ AI suggestions ready for {aiCount}/{totalRows} rows</p>
-                      )}
-                    </>
-                  ) : (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-sm">
-                        <span>Processing {totalRows} rows… {batchProgress}/{totalRows}
-                          {batchErrors > 0 && <span className="text-amber-600 ml-2">({batchErrors} errors)</span>}
-                        </span>
-                        <Button variant="outline" size="sm" onClick={stopBatch}
-                          className="border-red-300 text-red-600 hover:bg-red-50">
-                          Stop
-                        </Button>
-                      </div>
-                      <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
-                        <div className="bg-orange-500 h-full transition-all duration-300 rounded-full"
-                          style={{ width: `${totalRows > 0 ? Math.round((batchProgress / totalRows) * 100) : 0}%` }} />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
 
             {/* ── Next button ──────────────────────────────────────────── */}
             <Button className="w-full h-10 text-base"
@@ -1411,7 +1407,7 @@ export default function AbstractScreenerPage() {
         <h2 className="text-2xl font-bold">6. Export Results</h2>
         <div className="flex items-center gap-3 flex-wrap">
           {/* Analytics */}
-          <Button variant="outline" size="sm" onClick={() => setShowAnalytics(true)}
+          <Button variant="outline" size="sm" onClick={() => setShowAnalytics((v) => !v)}
             disabled={decidedCount === 0 && aiCount === 0}>
             <BarChart2 className="h-3.5 w-3.5 mr-1.5" /> Analytics
           </Button>
@@ -1450,16 +1446,16 @@ export default function AbstractScreenerPage() {
         </div>
       </div>
 
-      {/* ── Analytics Dialog ───────────────────────────────────────────────── */}
-      <ScreenerAnalyticsDialog
-        open={showAnalytics}
-        onOpenChange={setShowAnalytics}
-        data={data}
-        decisions={decisions}
-        aiResults={aiResults}
-        colMap={colMap}
-        onGoToRow={(idx) => { setCurrentIndex(idx); }}
-      />
+      {/* ── Analytics (inline) ─────────────────────────────────────────────── */}
+      {showAnalytics && (
+        <ScreenerAnalyticsPanel
+          data={data}
+          decisions={decisions}
+          aiResults={aiResults}
+          colMap={colMap}
+          onGoToRow={(idx) => { setCurrentIndex(idx); }}
+        />
+      )}
 
       {/* ── Pending load dialog ───────────────────────────────────────────── */}
       <Dialog open={!!pendingLoad} onOpenChange={(open) => { if (!open) setPendingLoad(null); }}>

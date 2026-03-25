@@ -81,6 +81,15 @@ export interface AgreementMatrix {
   pairAgreements: number[];
 }
 
+export interface WeightedMatrix {
+  matrix: number[][];    // [humanCodeIdx][aiCodeIdx]
+  rowTotals: number[];
+  colTotals: number[];
+  grandTotal: number;
+  rowLabels: string[];   // human codes
+  colLabels: string[];   // AI codes
+}
+
 export interface CodebookCode {
   id: string;
   name: string;

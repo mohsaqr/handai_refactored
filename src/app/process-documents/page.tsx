@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import pLimit from "p-limit";
 import { useDropzone } from "react-dropzone";
-import { DataTable } from "@/components/tools/DataTable";
+import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -31,6 +31,7 @@ import {
   Plus,
   Sparkles,
   Trash2,
+  Check,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { Row } from "@/types";
@@ -42,6 +43,13 @@ import { getPrompt, formatExtractionSchema } from "@/lib/prompts";
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const FIELD_TYPES: FieldDef["type"][] = ["text", "number", "date", "boolean", "list"];
+
+interface SuggestedField {
+  name: string;
+  type: "text" | "number" | "date" | "boolean" | "list";
+  description: string;
+  checked: boolean;
+}
 
 const TEMPLATES: Record<string, { label: string; desc: string; fields: FieldDef[] }> = {
   custom: { label: "Custom", desc: "Define your own extraction schema", fields: [] },
@@ -131,9 +139,34 @@ export default function ProcessDocumentsPage() {
 
   // ── Section 3: Define Columns
   const [fields, setFields] = useState<FieldDef[]>([]);
-  const [suggestedFields, setSuggestedFields] = useState<FieldDef[]>([]);
+  const [suggestedFields, setSuggestedFields] = useState<SuggestedField[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
   const [columnMode, setColumnMode] = useState<"ai" | "manual">("ai");
+  const [hasSuggestedOnce, setHasSuggestedOnce] = useState(false);
+
+  // ── Suggested fields helpers ──
+  const updateSuggestion = useCallback((idx: number, updates: Partial<SuggestedField>) => {
+    setSuggestedFields((prev) => prev.map((f, i) => (i === idx ? { ...f, ...updates } : f)));
+  }, []);
+
+  const removeSuggestion = useCallback((idx: number) => {
+    setSuggestedFields((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  const addSuggestion = useCallback(() => {
+    setSuggestedFields((prev) => [...prev, { name: "", type: "text", description: "", checked: true }]);
+  }, []);
+
+  // ── Sync suggested fields → fields ──
+  useEffect(() => {
+    const checked = suggestedFields.filter((f) => f.checked && f.name.trim());
+    if (checked.length > 0) {
+      setFields(checked.map((f) => ({ name: f.name, type: f.type, description: f.description })));
+    }
+  }, [suggestedFields]);
+
+  const checkedCount = suggestedFields.filter((f) => f.checked).length;
+  const hasSuggestions = suggestedFields.length > 0;
 
   // ── Auto-generate AI Instructions ──────────────────────────────────────────
   const buildAutoInstructions = useCallback(() => {
@@ -225,9 +258,16 @@ export default function ProcessDocumentsPage() {
       });
 
       if (result.fields?.length > 0) {
-        setSuggestedFields(result.fields);
-        setFields(result.fields);
-        toast.success(`${result.fields.length} fields suggested`);
+        const validTypes = new Set(FIELD_TYPES);
+        const mapped: SuggestedField[] = result.fields.map((f: FieldDef) => ({
+          name: f.name || "",
+          type: validTypes.has(f.type) ? f.type : "text",
+          description: f.description || "",
+          checked: true,
+        }));
+        setSuggestedFields(mapped);
+        setHasSuggestedOnce(true);
+        toast.success(`${mapped.length} fields suggested`);
       } else {
         toast.info("No suggestions returned. Try with a more structured document.");
       }
@@ -514,7 +554,7 @@ export default function ProcessDocumentsPage() {
             variant={columnMode === "ai" ? "default" : "outline"}
             size="sm"
             className="text-xs"
-            onClick={() => { setColumnMode("ai"); if (fileStates.length > 0) void analyzeSample(); }}
+            onClick={() => { setColumnMode("ai"); if (!hasSuggestedOnce && fileStates.length > 0) void analyzeSample(); }}
           >
             <Sparkles className="h-3.5 w-3.5 mr-1.5" />
             AI Mode
@@ -539,93 +579,154 @@ export default function ProcessDocumentsPage() {
             </SelectContent>
           </Select>
         </div>
+        {columnMode === "ai" && hasSuggestedOnce && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-xs"
+            onClick={() => void analyzeSample()}
+            disabled={analyzing}
+          >
+            {analyzing ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />}
+            Refresh AI
+          </Button>
+        )}
 
-        {/* AI mode */}
+        {/* AI mode content */}
         {columnMode === "ai" && (
           <>
+            {/* AI analyzing indicator */}
             {analyzing && (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" /> Analyzing document for field suggestions...
               </div>
             )}
 
-            {suggestedFields.length > 0 && (
+            {/* Suggested fields checklist */}
+            {hasSuggestions && (
               <div className="border rounded-lg overflow-hidden">
                 <div className="px-4 py-2.5 border-b bg-muted/20 flex items-center justify-between">
                   <span className="text-sm font-medium">Suggested Fields</span>
                   <span className="text-xs text-muted-foreground">
-                    {fields.length} of {suggestedFields.length} selected
+                    {checkedCount} of {suggestedFields.length} selected
                   </span>
                 </div>
                 <div className="p-3 space-y-1.5">
-                  {suggestedFields.map((sf, idx) => {
-                    const isAccepted = fields.some((f) => f.name === sf.name);
-                    return (
-                      <div key={idx} className="flex gap-2 items-center">
-                        <input
-                          type="checkbox"
-                          checked={isAccepted}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setFields((prev) => prev.some((f) => f.name === sf.name) ? prev : [...prev, sf]);
-                            } else {
-                              setFields((prev) => prev.filter((f) => f.name !== sf.name));
-                            }
-                          }}
-                          className="h-4 w-4 accent-primary shrink-0"
-                        />
-                        <Input
-                          value={sf.name}
-                          readOnly
-                          className="flex-1 h-8 text-xs font-mono"
-                        />
-                        <span className="text-xs text-muted-foreground w-16 shrink-0">{sf.type}</span>
-                        <span className="text-xs text-muted-foreground truncate flex-1" title={sf.description}>
-                          {sf.description}
-                        </span>
-                      </div>
-                    );
-                  })}
+                  {suggestedFields.map((field, idx) => (
+                    <div key={idx} className="flex gap-2 items-center">
+                      <input
+                        type="checkbox"
+                        checked={field.checked}
+                        onChange={(e) => updateSuggestion(idx, { checked: e.target.checked })}
+                        className="h-4 w-4 accent-primary shrink-0"
+                      />
+                      <Input
+                        placeholder="field_name"
+                        value={field.name}
+                        onChange={(e) => updateSuggestion(idx, { name: e.target.value })}
+                        className="flex-1 h-8 text-xs"
+                      />
+                      <Select
+                        value={field.type}
+                        onValueChange={(v) => updateSuggestion(idx, { type: v as SuggestedField["type"] })}
+                      >
+                        <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {FIELD_TYPES.map((t) => (
+                            <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        placeholder="Description"
+                        value={field.description}
+                        onChange={(e) => updateSuggestion(idx, { description: e.target.value })}
+                        className="flex-1 h-8 text-xs text-muted-foreground"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
+                        onClick={() => removeSuggestion(idx)}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+                <div className="px-3 pb-3 flex items-center gap-2">
+                  <Button variant="outline" size="sm" className="text-xs" onClick={addSuggestion}>
+                    <Plus className="h-3 w-3 mr-1.5" /> Add Field
+                  </Button>
+                  <div className="flex-1" />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs"
+                    onClick={() => setSuggestedFields((prev) => prev.map((f) => ({ ...f, checked: true })))}
+                  >
+                    <Check className="h-3 w-3 mr-1" /> Select All
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-xs"
+                    onClick={() => setSuggestedFields([])}
+                  >
+                    Clear
+                  </Button>
                 </div>
               </div>
             )}
-
           </>
         )}
 
-        {/* Manual mode */}
+        {/* Manual mode content */}
         {columnMode === "manual" && (
-          <div className="space-y-2">
-            {fields.map((field, idx) => (
-              <div key={idx} className="flex gap-2 items-center">
-                <Input
-                  placeholder="field_name"
-                  value={field.name}
-                  onChange={(e) => updateColumn(idx, { name: e.target.value.toLowerCase().replace(/\s+/g, "_") })}
-                  className="flex-1 h-8 text-xs font-mono"
-                />
-                <Select value={field.type} onValueChange={(v) => updateColumn(idx, { type: v as FieldDef["type"] })}>
-                  <SelectTrigger className="h-8 text-xs w-24"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {FIELD_TYPES.map((t) => (
-                      <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  placeholder="Description (optional)"
-                  value={field.description}
-                  onChange={(e) => updateColumn(idx, { description: e.target.value })}
-                  className="flex-1 h-8 text-xs"
-                />
-                <Button variant="ghost" size="sm" className="h-8 w-8 p-0 shrink-0" onClick={() => removeColumn(idx)}>
-                  <X className="h-3.5 w-3.5" />
+          <div className="space-y-3">
+            <div className="border rounded-lg overflow-hidden">
+              <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Column Schema</div>
+              <div className="p-3 space-y-2">
+                {fields.map((field, idx) => (
+                  <div key={idx} className="flex gap-2 items-center">
+                    <Input
+                      placeholder="column_name"
+                      value={field.name}
+                      onChange={(e) => updateColumn(idx, { name: e.target.value })}
+                      className="flex-1 h-8 text-xs"
+                    />
+                    <Select value={field.type} onValueChange={(v) => updateColumn(idx, { type: v as FieldDef["type"] })}>
+                      <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {FIELD_TYPES.map((t) => (
+                          <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      placeholder="Description (optional)"
+                      value={field.description || ""}
+                      onChange={(e) => updateColumn(idx, { description: e.target.value })}
+                      className="flex-1 h-8 text-xs text-muted-foreground"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
+                      onClick={() => removeColumn(idx)}
+                      disabled={fields.length === 1}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+              <div className="px-3 pb-3">
+                <Button variant="outline" size="sm" className="w-full text-xs" onClick={addColumn}>
+                  <Plus className="h-3 w-3 mr-2" /> Add Column
                 </Button>
               </div>
-            ))}
-            <Button variant="outline" size="sm" className="text-xs" onClick={addColumn}>
-              <Plus className="h-3.5 w-3.5 mr-1.5" /> Add Column
-            </Button>
+            </div>
           </div>
         )}
 
@@ -731,21 +832,13 @@ export default function ProcessDocumentsPage() {
                   View in History
                 </Link>
               )}
-              <Button
-                variant="outline" size="sm"
-                onClick={() => void downloadCSV(allResults, "extracted_documents.csv")}
-              >
-                <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV
-              </Button>
-              <Button
-                variant="outline" size="sm"
-                onClick={() => void downloadXLSX(allResults, "extracted_documents")}
-              >
-                <Download className="h-3.5 w-3.5 mr-1.5" /> Export XLSX
-              </Button>
             </div>
           </div>
           <div className="border rounded-lg overflow-hidden">
+            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between">
+              <span>Extracted Data — {allResults.length} rows</span>
+              <ExportDropdown data={allResults} filename="extracted_documents" />
+            </div>
             <DataTable data={allResults} showAll />
           </div>
         </div>

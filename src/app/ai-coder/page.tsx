@@ -24,8 +24,9 @@ import { ColumnSelector } from "@/components/tools/ColumnSelector";
 import { NoModelWarning } from "@/components/tools/NoModelWarning";
 
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { downloadCSV as downloadCSVFile, downloadXLSX } from "@/lib/export";
-import { AnalyticsDialog } from "./AnalyticsDialog";
+import { AnalyticsPanel } from "./AnalyticsDialog";
 import type { CodeEntry } from "./ReviewPanel";
 
 type Row = Record<string, unknown>;
@@ -269,7 +270,7 @@ function applyAllHighlights(text: string, codes: string[], highlightsMap: Record
 }
 
 // ─── AI response parser ──────────────────────────────────────────────────────
-function parseAIResponse(output: string): { codes: string[]; confidence: Record<string, number> } {
+function parseAIResponse(output: string, codebookCodes?: string[]): { codes: string[]; confidence: Record<string, number> } {
   let confidence: Record<string, number> = {};
   try {
     const jsonStr = output.replace(/^```json?\s*/i, "").replace(/\s*```$/, "").trim();
@@ -286,6 +287,18 @@ function parseAIResponse(output: string): { codes: string[]; confidence: Record<
     // Fallback: comma-separated codes (backward compat)
     const fallback = output.split(",").map((s) => s.trim()).filter((s) => s && s !== "Uncoded");
     fallback.forEach((c) => { confidence[c] = 80; });
+  }
+  // Filter out codes not in the codebook (case-insensitive match, keep codebook casing)
+  if (codebookCodes && codebookCodes.length > 0) {
+    const lowerMap = new Map(codebookCodes.map((c) => [c.toLowerCase(), c]));
+    const filtered: Record<string, number> = {};
+    for (const [key, val] of Object.entries(confidence)) {
+      const match = lowerMap.get(key.toLowerCase());
+      if (match) {
+        filtered[match] = (filtered[match] ?? 0) + val;
+      }
+    }
+    confidence = filtered;
   }
   // Normalize to sum = 100
   const total = Object.values(confidence).reduce((s, v) => s + v, 0);
@@ -436,6 +449,7 @@ export default function AICoderPage() {
   const [showSessions, setShowSessions] = useState(false);
   const [showTable, setShowTable] = useState(false);
   const [sessionName, setSessionName] = useState("");
+  const [pendingLoad, setPendingLoad] = useState<{ data: Row[]; name: string } | null>(null);
 
   // Analytics
   const [showAnalytics, setShowAnalytics] = useState(false);
@@ -518,7 +532,8 @@ export default function AICoderPage() {
     lines.push("- For EVERY code in the codebook, estimate the probability (0-100) that it applies");
     lines.push('- Return a JSON object mapping each code label to its probability (e.g. {"Code1": 70, "Code2": 20, "Code3": 10})');
     lines.push("- All probabilities must sum to 100");
-    lines.push("- Use ONLY the exact code labels from the codebook (no descriptions)");
+    lines.push("- Use ONLY the exact code labels from the codebook — do NOT add, invent, or rename any codes");
+    lines.push("- Every key in the JSON must match a codebook label exactly (case-sensitive)");
     lines.push("- Do not include any explanation");
     lines.push("");
 
@@ -614,7 +629,7 @@ export default function AICoderPage() {
       });
 
       const output = result.output.trim();
-      const { codes: parsedCodes, confidence } = parseAIResponse(output);
+      const { codes: parsedCodes, confidence } = parseAIResponse(output, codes);
 
       const suggestion: AISuggestion = { codes: parsedCodes, confidence, reasoning: undefined };
       setAiData((prev) => ({ ...prev, [idx]: suggestion }));
@@ -632,10 +647,8 @@ export default function AICoderPage() {
     if (codes.length === 0) { toast.error("Define at least one code"); return; }
 
     batchAbortRef.current = false;
-    const scrollY = window.scrollY;
     setBatchProcessing(true);
     setBatchProgress({ completed: 0, total: data.length });
-    requestAnimationFrame(() => window.scrollTo(0, scrollY));
 
     const runId = await dispatchCreateRun({
       runType: "ai-coder",
@@ -673,7 +686,7 @@ export default function AICoderPage() {
           });
 
           const output = result.output.trim();
-          const { codes: parsedCodes, confidence } = parseAIResponse(output);
+          const { codes: parsedCodes, confidence } = parseAIResponse(output, codes);
           newAiData[idx] = { codes: parsedCodes, confidence, reasoning: undefined };
           batchResults[idx] = { ...row, ai_codes: output, status: "success", latency_ms: result.latency };
         } catch (err) {
@@ -743,19 +756,32 @@ export default function AICoderPage() {
   }, [navigate, toggleCode, codes]);
 
   // ── Data loading ────────────────────────────────────────────────────────
-  const handleDataLoaded = (newData: Row[], name: string) => {
+  const doDataLoaded = (newData: Row[], name: string) => {
     setData(newData);
     setDataName(name);
     setCurrentIndex(0);
+    setCodebook([]);
     setCodingData({});
     setAiData({});
     toast.success(`Loaded ${newData.length} rows from ${name}`);
   };
 
+  const handleDataLoaded = (newData: Row[], name: string) => {
+    if (codedCount > 0) {
+      setPendingLoad({ data: newData, name });
+    } else {
+      doDataLoaded(newData, name);
+    }
+  };
+
   const loadSample = (key: string) => {
     const s = SAMPLE_DATASETS[key];
     if (!s) return;
-    handleDataLoaded(s.data as Row[], s.name);
+    if (codedCount > 0) {
+      setPendingLoad({ data: s.data as Row[], name: s.name });
+      return;
+    }
+    doDataLoaded(s.data as Row[], s.name);
     const cb = SAMPLE_CODEBOOKS[key];
     if (cb) {
       setCodebook(cb.map((e) => ({ ...e, id: crypto.randomUUID() })));
@@ -873,20 +899,6 @@ export default function AICoderPage() {
         <h1 className="text-4xl font-bold">AI Coder</h1>
         <p className="text-muted-foreground text-sm">AI-assisted qualitative coding with review &amp; analytics</p>
       </div>
-
-      {/* ── Info bar ──────────────────────────────────────────────────────── */}
-      {(sessionName || dataName || data.length > 0) && (
-        <div className="flex items-center gap-2 pb-6 flex-wrap">
-          <span className="ml-auto text-xs text-muted-foreground">
-            {sessionName || dataName ? (
-              <code className="text-orange-600 dark:text-orange-400 bg-orange-50 dark:bg-orange-950/30 px-1.5 py-0.5 rounded">
-                {sessionName || dataName}
-              </code>
-            ) : null}
-            {data.length > 0 && <span className="ml-2">{data.length} rows</span>}
-          </span>
-        </div>
-      )}
 
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
@@ -1014,7 +1026,7 @@ export default function AICoderPage() {
       <div className="border-t" />
 
       {/* ── 5. Code Data ───────────────────────────────────────────────────── */}
-      <div className="space-y-4 py-8">
+      <div className="space-y-2 py-8">
         <h2 className="text-2xl font-bold">5. Code Data</h2>
 
         {data.length === 0 ? (
@@ -1023,93 +1035,6 @@ export default function AICoderPage() {
           <p className="text-sm text-muted-foreground italic">Define at least one code in Section 3 to begin.</p>
         ) : (
           <>
-            {/* ── Settings toggles row ──────────────────────────────────── */}
-            <div className="flex items-center gap-5 flex-wrap text-sm border rounded-lg px-4 py-2.5 bg-muted/10">
-              <div className="flex items-center gap-2">
-                <Switch id="aic-light" checked={settings.lightMode} onCheckedChange={(v) => updateSettings({ lightMode: v })} />
-                <Label htmlFor="aic-light" className="text-xs cursor-pointer">Light mode</Label>
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch id="aic-horiz" checked={settings.horizontalCodes} onCheckedChange={(v) => updateSettings({ horizontalCodes: v })} />
-                <Label htmlFor="aic-horiz" className="text-xs cursor-pointer">Horizontal codes</Label>
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch id="aic-above" checked={settings.buttonsAboveText} onCheckedChange={(v) => updateSettings({ buttonsAboveText: v })} />
-                <Label htmlFor="aic-above" className="text-xs cursor-pointer">Buttons above text</Label>
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch id="aic-auto" checked={settings.autoAdvance} onCheckedChange={(v) => updateSettings({ autoAdvance: v })} />
-                <Label htmlFor="aic-auto" className="text-xs cursor-pointer">Auto-advance</Label>
-              </div>
-            </div>
-
-            {/* ── Code buttons (above text if setting) ────────────────────── */}
-            {settings.buttonsAboveText && (
-              <CodeButtonsPanel
-                codes={codes}
-                appliedCodes={appliedCodes}
-                currentSuggestion={currentSuggestion}
-                horizontal={settings.horizontalCodes}
-                onToggle={toggleCode}
-              />
-            )}
-
-            {/* ── Text display with context rows ──────────────────────────── */}
-            <div className="rounded-lg border overflow-hidden" style={{ minHeight: "280px" }}>
-              {(() => {
-                const contextRange: number[] = [];
-                for (let i = Math.max(0, currentIndex - settings.contextRows); i <= Math.min(totalRows - 1, currentIndex + settings.contextRows); i++) {
-                  contextRange.push(i);
-                }
-                return contextRange.map((rowIdx) => {
-                  const isCurrent = rowIdx === currentIndex;
-                  const row = data[rowIdx];
-                  if (!row) return null;
-                  return (
-                    <div
-                      key={rowIdx}
-                      className="px-4 py-3"
-                      style={isCurrent
-                        ? { backgroundColor: lightBg, color: lightText, borderLeft: "4px solid #4CAF50", fontSize: "1.05em" }
-                        : { backgroundColor: ctxBg, color: ctxText, borderLeft: "4px solid transparent", fontSize: "0.93em", opacity: 0.85 }}
-                      dangerouslySetInnerHTML={{ __html: getRowHtml(row, rowIdx, isCurrent) }}
-                    />
-                  );
-                });
-              })()}
-            </div>
-
-            {/* ── Code buttons (below text if setting) ────────────────────── */}
-            {!settings.buttonsAboveText && (
-              <CodeButtonsPanel
-                codes={codes}
-                appliedCodes={appliedCodes}
-                currentSuggestion={currentSuggestion}
-                horizontal={settings.horizontalCodes}
-                onToggle={toggleCode}
-              />
-            )}
-
-            {/* ── AI action bar ───────────────────────────────────────────── */}
-            <div className="flex items-center gap-2 flex-wrap">
-              {provider ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void getAiSuggestion()}
-                  disabled={isAiLoading}
-                  className="border-orange-400 text-orange-600 hover:bg-orange-50"
-                >
-                  {isAiLoading ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : null}
-                  {currentSuggestion ? "Refresh AI" : "Ask AI"}
-                </Button>
-              ) : (
-                <span className="text-xs text-muted-foreground">
-                  <a href="/settings" className="text-orange-500 underline">Configure model</a> for AI suggestions
-                </span>
-              )}
-            </div>
-
             {/* ── Batch Processing (collapsible) ─────────────────────────── */}
             <div className="border rounded-lg overflow-hidden">
               <button
@@ -1173,6 +1098,106 @@ export default function AICoderPage() {
                     </p>
                   )}
                 </div>
+              )}
+            </div>
+
+            {/* ── Settings toggles row ──────────────────────────────────── */}
+            <div className="flex items-center gap-5 flex-wrap text-sm border rounded-lg px-4 py-2.5 bg-muted/10 !mt-4">
+              <div className="flex items-center gap-2">
+                <Switch id="aic-light" checked={settings.lightMode} onCheckedChange={(v) => updateSettings({ lightMode: v })} />
+                <Label htmlFor="aic-light" className="text-xs cursor-pointer">Light mode</Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch id="aic-horiz" checked={settings.horizontalCodes} onCheckedChange={(v) => updateSettings({ horizontalCodes: v })} />
+                <Label htmlFor="aic-horiz" className="text-xs cursor-pointer">Horizontal codes</Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch id="aic-above" checked={settings.buttonsAboveText} onCheckedChange={(v) => updateSettings({ buttonsAboveText: v })} />
+                <Label htmlFor="aic-above" className="text-xs cursor-pointer">Buttons above text</Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch id="aic-auto" checked={settings.autoAdvance} onCheckedChange={(v) => updateSettings({ autoAdvance: v })} />
+                <Label htmlFor="aic-auto" className="text-xs cursor-pointer">Auto-advance</Label>
+              </div>
+              <div className="flex items-center gap-2 ml-auto">
+                <Label className="text-xs cursor-pointer">Context</Label>
+                <Button size="sm" variant="outline" className="h-6 w-6 p-0 text-xs" onClick={() => updateSettings({ contextRows: Math.max(0, settings.contextRows - 1) })}>−</Button>
+                <span className="text-xs font-mono w-4 text-center">{settings.contextRows}</span>
+                <Button size="sm" variant="outline" className="h-6 w-6 p-0 text-xs" onClick={() => updateSettings({ contextRows: Math.min(10, settings.contextRows + 1) })}>+</Button>
+              </div>
+            </div>
+
+            {/* ── Text + Codes core (tight, no gap) ─────────────────────── */}
+            <div className="space-y-0 !mt-4">
+              {/* Code buttons above text */}
+              {settings.buttonsAboveText && (
+                <div className="mb-1">
+                  <CodeButtonsPanel
+                    codes={codes}
+                    appliedCodes={appliedCodes}
+                    currentSuggestion={currentSuggestion}
+                    horizontal={settings.horizontalCodes}
+                    onToggle={toggleCode}
+                  />
+                </div>
+              )}
+
+              {/* Text display with context rows */}
+              <div className="rounded-lg border overflow-hidden">
+                {(() => {
+                  const contextRange: number[] = [];
+                  for (let i = Math.max(0, currentIndex - settings.contextRows); i <= Math.min(totalRows - 1, currentIndex + settings.contextRows); i++) {
+                    contextRange.push(i);
+                  }
+                  return contextRange.map((rowIdx) => {
+                    const isCurrent = rowIdx === currentIndex;
+                    const row = data[rowIdx];
+                    if (!row) return null;
+                    return (
+                      <div
+                        key={rowIdx}
+                        className="px-4 py-2"
+                        style={isCurrent
+                          ? { backgroundColor: lightBg, color: lightText, borderLeft: "4px solid #4CAF50", fontSize: "1.05em" }
+                          : { backgroundColor: ctxBg, color: ctxText, borderLeft: "4px solid transparent", fontSize: "0.93em", opacity: 0.85 }}
+                        dangerouslySetInnerHTML={{ __html: getRowHtml(row, rowIdx, isCurrent) }}
+                      />
+                    );
+                  });
+                })()}
+              </div>
+
+              {/* Code buttons below text */}
+              {!settings.buttonsAboveText && (
+                <div className="mt-1">
+                  <CodeButtonsPanel
+                    codes={codes}
+                    appliedCodes={appliedCodes}
+                    currentSuggestion={currentSuggestion}
+                    horizontal={settings.horizontalCodes}
+                    onToggle={toggleCode}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* ── AI action bar ───────────────────────────────────────────── */}
+            <div className="flex items-center gap-2 flex-wrap !mt-4">
+              {provider ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void getAiSuggestion()}
+                  disabled={isAiLoading}
+                  className="border-orange-400 text-orange-600 hover:bg-orange-50"
+                >
+                  {isAiLoading ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : null}
+                  {currentSuggestion ? "Refresh AI" : "Ask AI"}
+                </Button>
+              ) : (
+                <span className="text-xs text-muted-foreground">
+                  <a href="/settings" className="text-orange-500 underline">Configure model</a> for AI suggestions
+                </span>
               )}
             </div>
 
@@ -1334,7 +1359,7 @@ export default function AICoderPage() {
         <h2 className="text-2xl font-bold">6. Export Results</h2>
         <div className="flex items-center gap-3 flex-wrap">
           {/* Analytics */}
-          <Button variant="outline" size="sm" onClick={() => setShowAnalytics(true)} disabled={codedCount === 0 && aiCount === 0}>
+          <Button variant="outline" size="sm" onClick={() => setShowAnalytics((v) => !v)} disabled={codedCount === 0 && aiCount === 0}>
             <BarChart2 className="h-3.5 w-3.5 mr-1.5" /> Analytics
           </Button>
 
@@ -1394,22 +1419,45 @@ export default function AICoderPage() {
             </DropdownMenu>
           )}
         </div>
+
+        {/* ── Analytics (inline) ──────────────────────────────────────────── */}
+        {showAnalytics && (
+          <AnalyticsPanel
+            codebook={codebook}
+            results={data.map((row, i) => ({
+              ...row,
+              ai_codes: (aiData[i]?.codes ?? []).join(", "),
+            }))}
+            overrides={codingData}
+            aiData={aiData}
+            onGoToRow={(idx) => {
+              setCurrentIndex(idx);
+            }}
+          />
+        )}
       </div>
 
-      {/* ── Analytics Dialog ───────────────────────────────────────────────── */}
-      <AnalyticsDialog
-        open={showAnalytics}
-        onOpenChange={setShowAnalytics}
-        codebook={codebook}
-        results={data.map((row, i) => ({
-          ...row,
-          ai_codes: (aiData[i]?.codes ?? []).join(", "),
-        }))}
-        overrides={codingData}
-        onGoToRow={(idx) => {
-          setCurrentIndex(idx);
-        }}
-      />
+      {/* ── Pending load dialog ───────────────────────────────────────────── */}
+      <Dialog open={!!pendingLoad} onOpenChange={(open) => { if (!open) setPendingLoad(null); }}>
+        <DialogContent showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Replace current session?</DialogTitle>
+            <DialogDescription>
+              You have{" "}
+              <strong>{codedCount} coded record{codedCount !== 1 ? "s" : ""}</strong>{" "}
+              in the current session. Loading new data will replace all of this.
+              Your session has been autosaved.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingLoad(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={() => {
+              if (pendingLoad) doDataLoaded(pendingLoad.data, pendingLoad.name);
+              setPendingLoad(null);
+            }}>Load anyway</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

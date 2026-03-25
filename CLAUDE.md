@@ -39,7 +39,7 @@ npm run tauri build      # Production native installer (~10 MB)
 
 ### First-Time Setup
 
-`npm install` runs `postinstall` which triggers Prisma codegen + copies the PDF worker. Then `npx prisma migrate dev` creates `prisma/dev.db`. The only env var needed is `DATABASE_URL="file:./dev.db"` (see `.env.example`).
+`npm install` runs `postinstall` which triggers Prisma codegen (`prisma generate`). Then `npx prisma migrate dev` creates `prisma/dev.db`. The only env var needed is `DATABASE_URL="file:./dev.db"` (see `.env.example`).
 
 After schema changes: `npx prisma migrate dev --name <description>` to generate and apply a migration. To regenerate the Prisma client without migrating: `npx prisma generate`. To reset the database: `npx prisma migrate reset`.
 

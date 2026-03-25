@@ -19,7 +19,7 @@ import { UploadPreview } from "@/components/tools/UploadPreview";
 import { ColumnSelector } from "@/components/tools/ColumnSelector";
 import { NoModelWarning } from "@/components/tools/NoModelWarning";
 import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection";
-import { DataTable } from "@/components/tools/DataTable";
+import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 
 type Row = Record<string, unknown>;
@@ -440,12 +440,13 @@ export default function ModelComparisonPage() {
                   <ExternalLink className="h-3 w-3" />View in History
                 </Link>
               )}
-              <Button variant="outline" size="sm" onClick={handleExport}>
-                <Download className="h-4 w-4 mr-2" /> Export CSV
-              </Button>
             </div>
           </div>
           <div className="border rounded-lg overflow-hidden">
+            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between">
+              <span>Comparison Results — {results.length} rows</span>
+              <ExportDropdown data={results} filename="comparison_results" />
+            </div>
             <DataTable data={results} showAll />
           </div>
         </div>

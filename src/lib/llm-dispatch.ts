@@ -17,13 +17,20 @@ import {
   documentAnalyzeDirect,
 } from "./llm-browser";
 import type { ConsensusResult } from "./llm-browser";
-import { createRun, saveResults } from "./db-tauri";
+import { createRun as tauriCreateRun, saveResults as tauriSaveResults } from "./db-tauri";
+import { createRun as idbCreateRun, saveResults as idbSaveResults } from "./db-indexeddb";
 import type { FieldDef } from "@/types";
 
 // ── Runtime detection ────────────────────────────────────────────────────────
 
 export const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** Static web build (GitHub Pages) — no server, no Tauri. Uses IndexedDB + browser-direct LLM. */
+export const isStatic = process.env.NEXT_PUBLIC_STATIC === "1";
+
+/** True when LLM calls should go through browser-direct path (Tauri or static). */
+const useBrowserDirect = isTauri || isStatic;
 
 // ── Result entry type (shared with db-tauri) ─────────────────────────────────
 
@@ -51,7 +58,10 @@ export async function dispatchCreateRun(params: {
 }): Promise<string | null> {
   try {
     if (isTauri) {
-      const rd = await createRun(params);
+      const rd = await tauriCreateRun(params);
+      return rd.id ?? null;
+    } else if (isStatic) {
+      const rd = await idbCreateRun(params);
       return rd.id ?? null;
     } else {
       const runRes = await fetch("/api/runs", {
@@ -80,7 +90,9 @@ export async function dispatchSaveResults(
 ): Promise<void> {
   try {
     if (isTauri) {
-      await saveResults(runId, results);
+      await tauriSaveResults(runId, results);
+    } else if (isStatic) {
+      await idbSaveResults(runId, results);
     } else {
       await fetch("/api/results", {
         method: "POST",
@@ -106,9 +118,9 @@ export async function dispatchProcessRow(params: {
   temperature?: number;
   maxTokens?: number;
 }): Promise<{ output: string; latency: number }> {
-  if (isTauri) {
+  if (useBrowserDirect) {
     const result = await processRowDirect(params);
-    // Tauri returns latency in seconds — normalize to ms
+    // Browser-direct returns latency in seconds — normalize to ms
     return { output: result.output, latency: Math.round(result.latency * 1000) };
   } else {
     const t0 = Date.now();
@@ -145,7 +157,7 @@ export async function dispatchConsensusRow(params: {
   includeReasoning?: boolean;
   rowIdx?: number;
 }): Promise<ConsensusResult> {
-  if (isTauri) {
+  if (useBrowserDirect) {
     return await consensusRowDirect(params);
   } else {
     const res = await fetch("/api/consensus-row", {
@@ -184,7 +196,7 @@ export async function dispatchComparisonRow(params: {
     success: boolean;
   }>;
 }> {
-  if (isTauri) {
+  if (useBrowserDirect) {
     return await comparisonRowDirect(params);
   } else {
     const res = await fetch("/api/comparison-row", {
@@ -223,7 +235,7 @@ export async function dispatchAutomatorRow(params: {
   }>;
   success: boolean;
 }> {
-  if (isTauri) {
+  if (useBrowserDirect) {
     return await automatorRowDirect(params);
   } else {
     const res = await fetch("/api/automator-row", {
@@ -260,7 +272,7 @@ export async function dispatchGenerateRow(params: {
   count: number;
   raw?: string;
 }> {
-  if (isTauri) {
+  if (useBrowserDirect) {
     return await generateRowDirect(params);
   } else {
     const res = await fetch("/api/generate-row", {
@@ -314,7 +326,7 @@ export async function dispatchDocumentExtract(params: {
   truncated: boolean;
   count: number;
 }> {
-  if (isTauri) {
+  if (useBrowserDirect) {
     return await documentExtractDirect(params);
   } else {
     // Extract text in browser (pdfjs-dist works in browser but fails server-side)
@@ -355,7 +367,7 @@ export async function dispatchDocumentAnalyze(params: {
   baseUrl?: string;
   hint?: string;
 }): Promise<{ fields: FieldDef[] }> {
-  if (isTauri) {
+  if (useBrowserDirect) {
     return await documentAnalyzeDirect(params);
   } else {
     // Extract text in browser (pdfjs-dist works in browser but fails server-side)
