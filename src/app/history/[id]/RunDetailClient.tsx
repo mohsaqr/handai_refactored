@@ -33,9 +33,12 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog";
-import { getRun, deleteRun } from "@/lib/db-tauri";
+import { getRun as tauriGetRun, deleteRun as tauriDeleteRun } from "@/lib/db-tauri";
+import { getRun as idbGetRun, deleteRun as idbDeleteRun } from "@/lib/db-indexeddb";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const isStatic = process.env.NEXT_PUBLIC_STATIC === "1";
+const useBrowserDb = isTauri || isStatic;
 
 export default function RunDetailClient({ id }: { id: string }) {
     const router = useRouter();
@@ -48,8 +51,9 @@ export default function RunDetailClient({ id }: { id: string }) {
     useEffect(() => {
         const fetchRunDetail = async () => {
             try {
-                if (isTauri) {
-                    const data = await getRun(id);
+                if (useBrowserDb) {
+                    const getFn = isTauri ? tauriGetRun : idbGetRun;
+                    const data = await getFn(id);
                     if (!data) throw new Error("Run not found");
                     setRun(data.run);
                     setResults(data.results.map((r: any) => ({
@@ -84,8 +88,9 @@ export default function RunDetailClient({ id }: { id: string }) {
     const handleDelete = async () => {
         setIsDeleting(true);
         try {
-            if (isTauri) {
-                const result = await deleteRun(id);
+            if (useBrowserDb) {
+                const deleteFn = isTauri ? tauriDeleteRun : idbDeleteRun;
+                const result = await deleteFn(id);
                 if (!result.ok) throw new Error("Delete failed");
             } else {
                 const res = await fetch(`/api/runs/${id}`, { method: "DELETE" });

@@ -1,0 +1,57 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main, fix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build static site
+        env:
+          STATIC_BUILD: "1"
+          NEXT_PUBLIC_STATIC: "1"
+          PAGES_BASE_PATH: /${{ github.event.repository.name }}
+        run: |
+          set -e
+          # Move API routes and dynamic history page out (not compatible with static export)
+          mv src/app/api /tmp/handai_api_backup
+          mv "src/app/history/[id]/page.tsx" /tmp/handai_histid_page.tsx
+          npx next build
+          # Restore
+          mv /tmp/handai_api_backup src/app/api
+          mv /tmp/handai_histid_page.tsx "src/app/history/[id]/page.tsx"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
