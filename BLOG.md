@@ -64,4 +64,5 @@ Open Handai in your browser. Add a provider in Settings, or connect a local one.
 
 ---
 
+
 *Handai is free, open-source research software.*
