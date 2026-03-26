@@ -2,8 +2,8 @@
 
 import React, { useState, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { PromptEditor } from "@/components/tools/PromptEditor";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useAppStore } from "@/lib/store";
 import { useSystemSettings } from "@/lib/hooks";
@@ -332,31 +332,14 @@ export default function ModelComparisonPage() {
       {/* ── 4. Define Instructions */}
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">4. Define Instructions</h2>
-        <div className="flex gap-3 items-start">
-          <Textarea
-            value={systemPrompt}
-            onChange={(e) => setSystemPrompt(e.target.value)}
-            className="flex-1 min-h-[140px] font-mono text-sm resize-y"
-            placeholder="Describe what each model should do with each row..."
-          />
-          <div className="shrink-0">
-            <Select
-              onValueChange={(key) => {
-                if (SAMPLE_PROMPTS[key]) setSystemPrompt(SAMPLE_PROMPTS[key]);
-              }}
-            >
-              <SelectTrigger className="w-[200px] h-9 text-xs">
-                <SelectValue placeholder="-- Select a sample..." />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.keys(SAMPLE_PROMPTS).map((key) => (
-                  <SelectItem key={key} value={key} className="text-xs">{key}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-        <p className="text-[11px] text-muted-foreground">The same prompt is sent to every selected model. Results are shown side-by-side.</p>
+        <PromptEditor
+          value={systemPrompt}
+          onChange={setSystemPrompt}
+          placeholder="Describe what each model should do with each row..."
+          examplePrompts={SAMPLE_PROMPTS}
+          label="Instructions"
+          helpText="The same prompt is sent to every selected model. Results are shown side-by-side."
+        />
       </div>
 
       <div className="border-t" />
@@ -368,6 +351,13 @@ export default function ModelComparisonPage() {
         onChange={setAiInstructions}
       >
         <NoModelWarning activeModel={availableProviders.length > 0 ? availableProviders[0] : null} />
+        <div className="flex items-center gap-2 text-sm text-muted-foreground pt-2">
+          <span>Concurrency:</span>
+          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.max(1, c - 1))}>−</button>
+          <span className="px-3 border-x min-w-[2rem] text-center">{concurrency}</span>
+          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.min(10, c + 1))}>+</button>
+          <span className="text-xs">(parallel API calls)</span>
+        </div>
       </AIInstructionsSection>
 
       <div className="border-t" />
@@ -395,14 +385,6 @@ export default function ModelComparisonPage() {
             </div>
           </div>
         )}
-
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <span>Concurrency:</span>
-          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.max(1, c - 1))}>−</button>
-          <span className="px-3 border-x min-w-[2rem] text-center">{concurrency}</span>
-          <button className="px-2 py-1 border rounded hover:bg-muted transition-colors" onClick={() => setConcurrency(c => Math.min(10, c + 1))}>+</button>
-          <span className="text-xs">(parallel API calls)</span>
-        </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Button variant="outline" size="lg" className="h-12 text-sm border-dashed"

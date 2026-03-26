@@ -7,16 +7,15 @@ import { NoModelWarning } from "@/components/tools/NoModelWarning";
 import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { PromptEditor } from "@/components/tools/PromptEditor";
 import { useActiveModel, useSystemSettings } from "@/lib/hooks";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 import { useColumnSelection } from "@/hooks/useColumnSelection";
 import { getPrompt } from "@/lib/prompts";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Download, Loader2, CheckCircle2, ChevronDown, X } from "lucide-react";
-import * as XLSX from "xlsx";
+import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
+import { Loader2, CheckCircle2, X } from "lucide-react";
 import { toast } from "sonner";
 import type { Row } from "@/types";
 import { dispatchProcessRow, dispatchCreateRun, dispatchSaveResults } from "@/lib/llm-dispatch";
@@ -264,43 +263,11 @@ export default function CodebookGeneratorPage() {
     setStage("idle");
   };
 
-  const exportCsv = () => {
-    if (codebookStructured.length === 0) return;
-    const headers = ["Code", "Description", "Example"];
-    const csv = [
-      headers.join(","),
-      ...codebookStructured.map((e) =>
-        [e.code, e.description, e.example].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")
-      ),
-    ].join("\n");
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `codebook_${dataName || Date.now()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const exportXlsx = () => {
-    if (codebookStructured.length === 0) return;
-    const rows = codebookStructured.map((e) => ({ Code: e.code, Description: e.description, Example: e.example }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Codebook");
-    XLSX.writeFile(wb, `codebook_${dataName || Date.now()}.xlsx`);
-  };
-
-  const exportJson = () => {
-    if (codebookStructured.length === 0) return;
-    const blob = new Blob([JSON.stringify(codebookStructured, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `codebook_${dataName || Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  const codebookRows: Row[] = codebookStructured.map((e) => ({
+    Code: e.code,
+    Description: e.description,
+    Example: e.example,
+  }));
 
   const isProcessing = stage !== "idle" && stage !== "done";
   const stageOrder: Stage[] = ["discovery", "consolidation", "definition"];
@@ -347,32 +314,13 @@ export default function CodebookGeneratorPage() {
       {/* ── 2. Describe Codebook ──────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">2. Describe Codebook</h2>
-        <div className="flex gap-3 items-start">
-          <Textarea
-            placeholder="Example: Generate a codebook for thematic analysis of interview transcripts about workplace satisfaction..."
-            className="flex-1 min-h-[100px] text-sm resize-y"
-            value={codebookDescription}
-            onChange={(e) => setCodebookDescription(e.target.value)}
-          />
-          <div className="shrink-0">
-            <Select
-              onValueChange={(key) => {
-                if (SAMPLE_CODEBOOK_DESCRIPTIONS[key]) {
-                  setCodebookDescription(SAMPLE_CODEBOOK_DESCRIPTIONS[key]);
-                }
-              }}
-            >
-              <SelectTrigger className="w-[200px] h-9 text-xs">
-                <SelectValue placeholder="-- Select a sample..." />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.keys(SAMPLE_CODEBOOK_DESCRIPTIONS).map((key) => (
-                  <SelectItem key={key} value={key} className="text-xs">{key}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+        <PromptEditor
+          value={codebookDescription}
+          onChange={setCodebookDescription}
+          placeholder="Example: Generate a codebook for thematic analysis of interview transcripts about workplace satisfaction..."
+          examplePrompts={SAMPLE_CODEBOOK_DESCRIPTIONS}
+          label="Instructions"
+        />
 
         <ColumnSelector
           allColumns={allColumns}
@@ -501,49 +449,19 @@ export default function CodebookGeneratorPage() {
       )}
 
       {/* ── Results ────────────────────────────────────────────────────────── */}
-      {codebookStructured.length > 0 && (
+      {codebookRows.length > 0 && (
         <div className="space-y-4 border-t pt-6 pb-8">
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-lg font-semibold">Results</h2>
               <p className="text-xs text-muted-foreground mt-0.5">
-                {codebookStructured.length} codes generated
+                {codebookRows.length} codes generated
               </p>
             </div>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm">
-                  <Download className="h-3.5 w-3.5 mr-1.5" /> Export <ChevronDown className="h-3 w-3 ml-1.5" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent>
-                <DropdownMenuItem onClick={exportCsv}>CSV</DropdownMenuItem>
-                <DropdownMenuItem onClick={exportXlsx}>Excel (.xlsx)</DropdownMenuItem>
-                <DropdownMenuItem onClick={exportJson}>JSON</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <ExportDropdown data={codebookRows} filename="codebook" />
           </div>
 
-          <div className="border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-muted/20 border-b">
-                  <th className="text-left px-4 py-2.5 font-medium">Code</th>
-                  <th className="text-left px-4 py-2.5 font-medium">Description</th>
-                  <th className="text-left px-4 py-2.5 font-medium">Example</th>
-                </tr>
-              </thead>
-              <tbody>
-                {codebookStructured.map((entry, idx) => (
-                  <tr key={idx} className="border-b last:border-b-0 hover:bg-muted/5">
-                    <td className="px-4 py-2.5 font-medium text-xs">{entry.code}</td>
-                    <td className="px-4 py-2.5 text-xs text-muted-foreground">{entry.description}</td>
-                    <td className="px-4 py-2.5 text-xs text-muted-foreground italic">{entry.example}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable data={codebookRows} />
         </div>
       )}
     </div>

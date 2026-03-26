@@ -144,6 +144,10 @@ localStorage keys: `aic_autosave` (session recovery), `aic_settings` (UI setting
 
 6 sample datasets are available in `src/lib/sample-data.ts` (product reviews, healthcare interviews, support tickets, learning experiences, exit interviews, stakeholder feedback) — all tools can use these for testing without requiring file uploads.
 
+### CI/CD
+
+GitHub Pages deployment via `.github/workflows/` on push to `main` or `fix`. Uses `STATIC_BUILD=1`, `NEXT_PUBLIC_STATIC=1`, and `PAGES_BASE_PATH=/<repo-name>` env vars. The `build:static` script (`bash scripts/build-static.sh`) handles static export similarly to `build:tauri`.
+
 ### Conventions
 
 - All fetch calls must check `if (!res.ok) throw new Error(...)` before `res.json()`
@@ -152,6 +156,7 @@ localStorage keys: `aic_autosave` (session recovery), `aic_settings` (UI setting
 - API keys are stored in browser localStorage (Zustand persist), never in `.env` for local dev
 - `db-tauri.ts` has pre-existing TS errors (Tauri types only resolve in Tauri build context) — this is expected
 - Tauri runtime detection: `typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window`
+- Document encoding fallback chain: check UTF-8 BOM → try UTF-8 → fall back to Windows-1252 if replacement chars detected (`document-extract/route.ts`, `document-browser.ts`)
 - 10 LLM providers supported: OpenAI, Anthropic, Google, Groq, Together, Azure, OpenRouter, Ollama, LM Studio, Custom — all configured via `src/lib/store.ts`
 - Each tool page mirrors its API route in `src/lib/llm-browser.ts` for Tauri (e.g., `processRowDirect()` mirrors `/api/process-row`)
 - Validate all API route inputs with Zod schemas from `src/lib/validation.ts` — add a new schema there when adding a new route

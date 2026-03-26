@@ -35,8 +35,9 @@ import { ScreenerAnalyticsPanel } from "./ScreenerAnalyticsDialog";
 type Decision = "include" | "exclude" | "maybe" | null;
 
 interface AIScreenResult {
-  decision: "include" | "exclude";
+  decision: "include" | "exclude" | "maybe";
   confidence: number;
+  probabilities: { include: number; maybe: number; exclude: number };
   reasoning: string;
   highlightTerms: string[];
   latency: number;
@@ -158,6 +159,27 @@ function extractJson(text: string): Record<string, unknown> | null {
     try { return JSON.parse(braceMatch[0]) as Record<string, unknown>; } catch { /* fall through */ }
   }
   return null;
+}
+
+function parseProbabilities(
+  parsed: Record<string, unknown> | null,
+  decision: "include" | "exclude" | "maybe"
+): { include: number; maybe: number; exclude: number } {
+  // Try new probabilities format first
+  const probs = parsed?.probabilities as Record<string, number> | undefined;
+  if (probs && typeof probs.include === "number" && typeof probs.exclude === "number") {
+    return {
+      include: Math.max(0, Math.min(1, probs.include)),
+      maybe: Math.max(0, Math.min(1, probs.maybe ?? 0)),
+      exclude: Math.max(0, Math.min(1, probs.exclude)),
+    };
+  }
+  // Fallback: derive from old single confidence value
+  const conf = typeof parsed?.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : 0.8;
+  const rest = Math.max(0, 1 - conf);
+  if (decision === "include") return { include: conf, maybe: rest * 0.5, exclude: rest * 0.5 };
+  if (decision === "exclude") return { include: rest * 0.5, maybe: rest * 0.5, exclude: conf };
+  return { include: rest * 0.5, maybe: conf, exclude: rest * 0.5 };
 }
 
 function autoDetectColMap(cols: string[]): ColMap {
@@ -283,8 +305,9 @@ export default function AbstractScreenerPage() {
     }
 
     lines.push("RULES:");
-    lines.push("- For each abstract, decide: include or exclude");
-    lines.push('- Return a JSON object: {"decision": "include"|"exclude", "confidence": 0-1, "reasoning": "...", "highlight_terms": ["..."]}');
+    lines.push("- For each abstract, decide: include, maybe, or exclude");
+    lines.push('- Return a JSON object: {"decision": "include"|"maybe"|"exclude", "probabilities": {"include": 0.0, "maybe": 0.0, "exclude": 0.0}, "reasoning": "...", "highlight_terms": ["..."]}');
+    lines.push("- probabilities must sum to 1.0 and represent your confidence in each decision");
     lines.push("- Base decisions strictly on the criteria above");
     lines.push("- Do not include markdown or code fences");
     lines.push("");
@@ -576,12 +599,14 @@ export default function AbstractScreenerPage() {
         });
 
         const parsed = extractJson(output);
-        const rawConf = typeof parsed?.confidence === "number" ? parsed.confidence : 0.8;
+        const decision: "include" | "exclude" | "maybe" =
+          parsed?.decision === "include" || parsed?.decision === "exclude" || parsed?.decision === "maybe"
+            ? (parsed.decision as "include" | "exclude" | "maybe") : "exclude";
+        const probabilities = parseProbabilities(parsed, decision);
         results[i] = {
-          decision:
-            parsed?.decision === "include" || parsed?.decision === "exclude"
-              ? (parsed.decision as "include" | "exclude") : "exclude",
-          confidence: Math.max(0, Math.min(1, rawConf)),
+          decision,
+          confidence: probabilities[decision],
+          probabilities,
           reasoning: typeof parsed?.reasoning === "string" ? parsed.reasoning : "",
           highlightTerms: Array.isArray(parsed?.highlight_terms)
             ? (parsed.highlight_terms as unknown[]).filter((t): t is string => typeof t === "string")
@@ -643,11 +668,14 @@ export default function AbstractScreenerPage() {
       });
 
       const parsed = extractJson(output);
-      const rawConf = typeof parsed?.confidence === "number" ? parsed.confidence : 0.8;
+      const decision: "include" | "exclude" | "maybe" =
+        parsed?.decision === "include" || parsed?.decision === "exclude" || parsed?.decision === "maybe"
+          ? (parsed.decision as "include" | "exclude" | "maybe") : "exclude";
+      const probabilities = parseProbabilities(parsed, decision);
       const result: AIScreenResult = {
-        decision: parsed?.decision === "include" || parsed?.decision === "exclude"
-          ? (parsed.decision as "include" | "exclude") : "exclude",
-        confidence: Math.max(0, Math.min(1, rawConf)),
+        decision,
+        confidence: probabilities[decision],
+        probabilities,
         reasoning: typeof parsed?.reasoning === "string" ? parsed.reasoning : "",
         highlightTerms: Array.isArray(parsed?.highlight_terms)
           ? (parsed.highlight_terms as unknown[]).filter((t): t is string => typeof t === "string")
@@ -701,11 +729,18 @@ export default function AbstractScreenerPage() {
   };
 
   // ── With-AI export (original data + ai columns + final_decision) ──
+  const formatProbs = (probs?: { include: number; maybe: number; exclude: number }) => {
+    if (!probs) return "";
+    return (["include", "maybe", "exclude"] as const)
+      .filter((d) => probs[d] > 0)
+      .map((d) => `${d.charAt(0).toUpperCase() + d.slice(1)} ${Math.round(probs[d] * 100)}%`)
+      .join(", ");
+  };
+
   const buildWithAIRows = () => data.map((row, i) => ({
     ...row,
     ai_decision: aiResults[i]?.decision ?? "",
-    ai_confidence: aiResults[i]?.confidence != null
-      ? `${Math.round(aiResults[i].confidence * 100)}%` : "",
+    ai_probabilities: formatProbs(aiResults[i]?.probabilities),
     ai_reasoning: aiResults[i]?.reasoning ?? "",
     final_decision: decisions[i] ?? "",
   }));
@@ -715,8 +750,7 @@ export default function AbstractScreenerPage() {
     journal:        colMap.journal ? String(row[colMap.journal] ?? "") : "",
     year:           String(row.year ?? row.Year ?? ""),
     ai_decision: aiResults[i]?.decision ?? "",
-    ai_confidence: aiResults[i]?.confidence != null
-      ? `${Math.round(aiResults[i].confidence * 100)}%` : "",
+    ai_probabilities: formatProbs(aiResults[i]?.probabilities),
     final_decision: decisions[i] ?? "",
   }));
 
@@ -768,6 +802,7 @@ export default function AbstractScreenerPage() {
       decision: decisions[i] ?? null,
       aiDecision: aiResults[i]?.decision ?? null,
       aiConf: aiResults[i]?.confidence ?? null,
+      aiProbs: aiResults[i]?.probabilities ?? null,
     }))
     .filter((r) => {
       if (tableFilter === "all") return true;
@@ -1101,7 +1136,7 @@ export default function AbstractScreenerPage() {
                 ).map(({ d, label, shortcut, active, aiHint, inactive }) => {
                   const isActive = currentDecision === d;
                   const isAISuggested = !isActive && currentAI?.decision === d;
-                  const conf = currentAI?.decision === d ? currentAI.confidence : null;
+                  const conf = currentAI?.probabilities?.[d] ?? null;
                   return (
                     <button key={d} onClick={() => setDecision(d)}
                       className={cn(
@@ -1169,12 +1204,14 @@ export default function AbstractScreenerPage() {
                   "shrink-0 text-xs font-bold px-2.5 py-1 rounded-full uppercase tracking-wide",
                   currentAI.decision === "include"
                     ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                    : currentAI.decision === "maybe"
+                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
                     : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
                 )}>
-                  AI: {currentAI.decision}
-                  {currentAI.confidence > 0 && (
-                    <span className="ml-1 opacity-70">{Math.round(currentAI.confidence * 100)}%</span>
-                  )}
+                  AI: {(["include", "maybe", "exclude"] as const)
+                    .filter((d) => (currentAI.probabilities?.[d] ?? 0) > 0)
+                    .map((d) => `${d.charAt(0).toUpperCase() + d.slice(1)} ${Math.round((currentAI.probabilities?.[d] ?? 0) * 100)}%`)
+                    .join(", ")}
                 </span>
                 <div className="flex-1 min-w-0">
                   <button onClick={() => setShowAIReasoning((v) => !v)}
@@ -1210,7 +1247,7 @@ export default function AbstractScreenerPage() {
                 ).map(({ d, label, shortcut, active, aiHint, inactive }) => {
                   const isActive = currentDecision === d;
                   const isAISuggested = !isActive && currentAI?.decision === d;
-                  const conf = currentAI?.decision === d ? currentAI.confidence : null;
+                  const conf = currentAI?.probabilities?.[d] ?? null;
                   return (
                     <button key={d} onClick={() => setDecision(d)}
                       className={cn(
@@ -1363,7 +1400,7 @@ export default function AbstractScreenerPage() {
                   <span className="ml-auto text-xs text-muted-foreground">{tableRows.length} rows</span>
                 </div>
                 <div className="max-h-72 overflow-y-auto divide-y">
-                  {tableRows.map(({ i, title, decision, aiDecision, aiConf }) => (
+                  {tableRows.map(({ i, title, decision, aiDecision, aiProbs }) => (
                     <button key={i} onClick={() => { setCurrentIndex(i); setShowTable(false); }}
                       className={cn(
                         "w-full text-left px-4 py-2.5 hover:bg-muted/30 transition-colors flex items-center gap-3",
@@ -1372,13 +1409,18 @@ export default function AbstractScreenerPage() {
                       <span className="text-xs text-muted-foreground w-8 shrink-0">{i + 1}</span>
                       <span className="text-sm flex-1 truncate">{title}</span>
                       <div className="flex items-center gap-1.5 shrink-0">
-                        {aiDecision && (
+                        {aiDecision && aiProbs && (
                           <span className={cn("text-[10px] px-1.5 py-0.5 rounded border",
                             aiDecision === "include"
                               ? "border-green-300 text-green-600 dark:border-green-800 dark:text-green-400"
+                              : aiDecision === "maybe"
+                              ? "border-amber-300 text-amber-600 dark:border-amber-800 dark:text-amber-400"
                               : "border-red-300 text-red-600 dark:border-red-800 dark:text-red-400"
                           )}>
-                            AI{aiConf ? ` ${Math.round(aiConf * 100)}%` : ""}
+                            {(["include", "maybe", "exclude"] as const)
+                              .filter((d) => (aiProbs?.[d] ?? 0) > 0)
+                              .map((d) => `${d.charAt(0).toUpperCase() + d.slice(1)} ${Math.round((aiProbs?.[d] ?? 0) * 100)}%`)
+                              .join(", ")}
                           </span>
                         )}
                         {decision ? (

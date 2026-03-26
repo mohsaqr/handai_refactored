@@ -319,7 +319,7 @@ function exportCSV(
   codes: string[],
   codingData: Record<number, string[]>,
   aiData: Record<number, AISuggestion>,
-  mode: "standard" | "onehot" | "withAI",
+  mode: "standard" | "onehot" | "onehotAI" | "withAI",
   dataName: string
 ) {
   const rows: Record<string, unknown>[] = data.map((row, i) => {
@@ -327,11 +327,19 @@ function exportCSV(
     const ai = aiData[i];
 
     if (mode === "standard") {
-      return { ...row, codes: humanCodes.join("; ") };
+      return { ...row, human_codes: humanCodes.join("; ") };
     }
     if (mode === "onehot") {
       const oneHot: Record<string, unknown> = { ...row };
       codes.forEach((c) => { oneHot[c] = humanCodes.includes(c) ? 1 : 0; });
+      return oneHot;
+    }
+    if (mode === "onehotAI") {
+      const oneHot: Record<string, unknown> = { ...row };
+      codes.forEach((c) => {
+        oneHot[`Human_${c}`] = humanCodes.includes(c) ? 1 : 0;
+        oneHot[`ai_${c}`] = ai?.confidence?.[c] ? +(ai.confidence[c] / 100).toFixed(4) : 0;
+      });
       return oneHot;
     }
     // withAI — compare human codes against only the top AI code
@@ -344,7 +352,9 @@ function exportCSV(
       ...row,
       human_codes: humanCodes.join("; "),
       ai_codes: topAiCode,
-      ai_reasoning: ai?.reasoning ?? "",
+      ai_probabilities: ai?.confidence
+        ? "{" + Object.entries(ai.confidence).sort(([,a],[,b]) => b - a).map(([k,v]) => `${k}(${Math.round(v)}%)`).join(",") + "}"
+        : "",
       agreement: String(agree),
     };
   });
@@ -372,18 +382,26 @@ function buildExportRows(
   codes: string[],
   codingData: Record<number, string[]>,
   aiData: Record<number, AISuggestion>,
-  mode: "standard" | "onehot" | "withAI"
+  mode: "standard" | "onehot" | "onehotAI" | "withAI"
 ): Record<string, unknown>[] {
   return data.map((row, i) => {
     const humanCodes = codingData[i] ?? [];
     const ai = aiData[i];
 
     if (mode === "standard") {
-      return { ...row, codes: humanCodes.join("; ") };
+      return { ...row, human_codes: humanCodes.join("; ") };
     }
     if (mode === "onehot") {
       const oneHot: Record<string, unknown> = { ...row };
       codes.forEach((c) => { oneHot[c] = humanCodes.includes(c) ? 1 : 0; });
+      return oneHot;
+    }
+    if (mode === "onehotAI") {
+      const oneHot: Record<string, unknown> = { ...row };
+      codes.forEach((c) => {
+        oneHot[`Human_${c}`] = humanCodes.includes(c) ? 1 : 0;
+        oneHot[`ai_${c}`] = ai?.confidence?.[c] ? +(ai.confidence[c] / 100).toFixed(4) : 0;
+      });
       return oneHot;
     }
     // withAI — compare human codes against only the top AI code
@@ -396,7 +414,9 @@ function buildExportRows(
       ...row,
       human_codes: humanCodes.join("; "),
       ai_codes: topAiCode,
-      ai_confidence: ai?.confidence ? JSON.stringify(ai.confidence) : "",
+      ai_probabilities: ai?.confidence
+        ? "{" + Object.entries(ai.confidence).sort(([,a],[,b]) => b - a).map(([k,v]) => `${k}(${Math.round(v)}%)`).join(",") + "}"
+        : "",
       agreement: String(agree),
     };
   });
@@ -711,8 +731,10 @@ export default function AICoderPage() {
       await dispatchSaveResults(runId, resultEntries);
     }
 
+    const scrollY = window.scrollY;
     setAiData((prev) => ({ ...prev, ...newAiData }));
     setBatchProcessing(false);
+    requestAnimationFrame(() => window.scrollTo(0, scrollY));
 
     const errorCount = batchResults.filter((r) => r.status === "error").length;
     if (errorCount > 0) {
@@ -1405,7 +1427,7 @@ export default function AICoderPage() {
                 }}>CSV (standard)</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => {
                   const base = (dataName || "data").replace(/\.[^.]+$/, "");
-                  void downloadCSVFile(buildExportRows(data, codes, codingData, aiData, "onehot"), `${base}_with_ai_onehot.csv`);
+                  void downloadCSVFile(buildExportRows(data, codes, codingData, aiData, "onehotAI"), `${base}_with_ai_onehot.csv`);
                 }}>CSV (one-hot)</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => {
                   const base = (dataName || "data").replace(/\.[^.]+$/, "");

@@ -5,8 +5,8 @@ import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { PromptEditor } from "@/components/tools/PromptEditor";
 import { useActiveModel } from "@/lib/hooks";
 import { Sparkles, Plus, Trash2, Download, Loader2, Minus, ExternalLink, Check, X } from "lucide-react";
 import Link from "next/link";
@@ -308,32 +308,13 @@ export default function GeneratePage() {
       {/* ── 1. Describe Your Data ───────────────────────────────────────── */}
       <div className="space-y-3 pb-8">
         <h2 className="text-2xl font-bold">1. Describe Data</h2>
-        <div className="flex gap-3 items-start">
-          <Textarea
-            placeholder="Example: Generate realistic customer profiles including full names, email addresses, and purchase history..."
-            className="flex-1 min-h-[100px] text-sm resize-y"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <div className="shrink-0">
-            <Select
-              onValueChange={(key) => {
-                if (SAMPLE_PROMPTS[key]) {
-                  setDescription(SAMPLE_PROMPTS[key]);
-                }
-              }}
-            >
-              <SelectTrigger className="w-[200px] h-9 text-xs">
-                <SelectValue placeholder="-- Select a sample..." />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.keys(SAMPLE_PROMPTS).map((key) => (
-                  <SelectItem key={key} value={key} className="text-xs">{key}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+        <PromptEditor
+          value={description}
+          onChange={setDescription}
+          placeholder="Example: Generate realistic customer profiles including full names, email addresses, and purchase history..."
+          examplePrompts={SAMPLE_PROMPTS}
+          label="Instructions"
+        />
       </div>
 
       <div className="border-t" />

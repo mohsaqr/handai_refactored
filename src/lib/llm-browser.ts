@@ -276,6 +276,16 @@ export async function consensusRowDirect(params: {
   enableQualityScoring?: boolean;
   enableDisagreementAnalysis?: boolean;
 }): Promise<ConsensusResult> {
+  // Enforce direct-answer-only rules on every worker prompt
+  const strictSuffix = `\n\nSTRICT OUTPUT RULES (always apply):
+- Output ONLY the answer to the instruction. No notes, no explanations, no reasoning, no commentary, no caveats.
+- Plain text or CSV only. NEVER use markdown: no **, no ## headings, no bullet points, no code blocks, no backticks.
+- Do NOT add headers, labels, introductions, or sign-offs.
+- Do NOT prefix with "Answer:", "Result:", "Note:", or any label.
+- Do NOT add extra sentences, context, or qualifications.
+- If the instruction asks for a single value, return that value and NOTHING else.`;
+  const enforced = params.workerPrompt + strictSuffix;
+
   // Step 1: Run workers in parallel
   const workerPromises = params.workers.map(async (w, i) => {
     const model = getModel(w.provider, w.model, w.apiKey || "local", w.baseUrl);
@@ -284,7 +294,7 @@ export async function consensusRowDirect(params: {
       () =>
         generateText({
           model,
-          system: params.workerPrompt,
+          system: enforced,
           prompt: params.userContent,
           temperature: 0,
         }),

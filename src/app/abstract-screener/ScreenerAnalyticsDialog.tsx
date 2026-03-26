@@ -7,8 +7,9 @@ type Row = Record<string, unknown>;
 type Decision = "include" | "exclude" | "maybe" | null;
 
 interface AIScreenResult {
-  decision: "include" | "exclude";
+  decision: "include" | "exclude" | "maybe";
   confidence: number;
+  probabilities: { include: number; maybe: number; exclude: number };
   reasoning: string;
   highlightTerms: string[];
   latency: number;

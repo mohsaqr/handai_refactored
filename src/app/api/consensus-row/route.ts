@@ -29,6 +29,16 @@ export async function POST(req: NextRequest) {
       enableDisagreementAnalysis,
     } = parsed.data;
 
+    // Enforce direct-answer-only rules on every worker prompt
+    const strictSuffix = `\n\nSTRICT OUTPUT RULES (always apply):
+- Output ONLY the answer to the instruction. No notes, no explanations, no reasoning, no commentary, no caveats.
+- Plain text or CSV only. NEVER use markdown: no **, no ## headings, no bullet points, no code blocks, no backticks.
+- Do NOT add headers, labels, introductions, or sign-offs.
+- Do NOT prefix with "Answer:", "Result:", "Note:", or any label.
+- Do NOT add extra sentences, context, or qualifications.
+- If the instruction asks for a single value, return that value and NOTHING else.`;
+    const enforced = workerPrompt + strictSuffix;
+
     // Step 1: Run workers in parallel
     const workerPromises = workers.map(async (w, i) => {
       const model = getModel(w.provider, w.model, w.apiKey || "local", w.baseUrl);
@@ -37,7 +47,7 @@ export async function POST(req: NextRequest) {
         () =>
           generateText({
             model,
-            system: workerPrompt,
+            system: enforced,
             prompt: userContent,
             temperature: 0,
           }),

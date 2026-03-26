@@ -5,7 +5,6 @@ import pLimit from "p-limit";
 import { useDropzone } from "react-dropzone";
 import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -13,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { PromptEditor } from "@/components/tools/PromptEditor";
 import { Input } from "@/components/ui/input";
 import { useActiveModel, useSystemSettings } from "@/lib/hooks";
 import { NoModelWarning } from "@/components/tools/NoModelWarning";
@@ -510,33 +510,14 @@ export default function ProcessDocumentsPage() {
       {/* ── 2. Extraction Prompt ─────────────────────────────────────────── */}
       <div className="space-y-3 py-8">
         <h2 className="text-2xl font-bold">2. Extraction Prompt</h2>
-        <div className="flex gap-3 items-start">
-          <Textarea
-            placeholder="Describe what you want to extract from the documents. E.g.: Extract invoice details including amounts, dates, and vendor names..."
-            className="flex-1 min-h-[100px] text-sm resize-y"
-            value={customPrompt}
-            onChange={(e) => setCustomPrompt(e.target.value)}
-          />
-          <div className="shrink-0">
-            <Select
-              onValueChange={(key) => {
-                if (SAMPLE_EXTRACTION_PROMPTS[key]) setCustomPrompt(SAMPLE_EXTRACTION_PROMPTS[key]);
-              }}
-            >
-              <SelectTrigger className="w-[200px] h-9 text-xs">
-                <SelectValue placeholder="-- Select a sample..." />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.keys(SAMPLE_EXTRACTION_PROMPTS).map((key) => (
-                  <SelectItem key={key} value={key} className="text-xs">{key}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Describe the data you want to extract. This feeds into the AI instructions and helps the AI suggest columns.
-        </p>
+        <PromptEditor
+          value={customPrompt}
+          onChange={setCustomPrompt}
+          placeholder="Describe what you want to extract from the documents. E.g.: Extract invoice details including amounts, dates, and vendor names..."
+          examplePrompts={SAMPLE_EXTRACTION_PROMPTS}
+          label="Instructions"
+          helpText="Describe the data you want to extract. This feeds into the AI instructions and helps the AI suggest columns."
+        />
       </div>
 
       <div className="border-t" />
