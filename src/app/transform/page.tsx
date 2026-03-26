@@ -45,7 +45,6 @@ export default function TransformPage() {
   const [data, setData] = useState<Row[]>([]);
   const [dataName, setDataName] = useState("");
   const [systemPrompt, setSystemPrompt] = usePersistedPrompt("handai_prompt_transform");
-  const [explanations, setExplanations] = useState<Array<{ rowIdx: number; text: string }>>([]);
 
   // Version history
   type HistoryEntry = { data: Row[]; dataName: string; timestamp: number };
@@ -113,8 +112,8 @@ export default function TransformPage() {
     }
 
     lines.push("RULES:");
-    lines.push("- Return ONLY a valid JSON object with the selected column names as keys, containing the transformed values");
-    lines.push("- Do not include any explanation or commentary — return only the result");
+    lines.push("- Return ONLY the transformed result as plain text — no JSON, no markdown, no formatting");
+    lines.push("- Do not include any explanation, labels, or commentary");
     lines.push("");
     lines.push(AI_INSTRUCTIONS_MARKER);
 
@@ -147,10 +146,6 @@ export default function TransformPage() {
         return { ...row, status: "skipped", latency_ms: 0 };
       }
 
-      // Save originals before the LLM overwrites them
-      const originals: Row = {};
-      selectedCols.forEach((col) => { originals[`original_${col}`] = row[col]; });
-
       const subset: Row = {};
       selectedCols.forEach((col) => (subset[col] = row[col]));
 
@@ -164,41 +159,16 @@ export default function TransformPage() {
         temperature: systemSettings.temperature,
       });
 
-      const latency = result.latency;
-
-      let parsed: Record<string, unknown> | null = null;
-      try { parsed = JSON.parse(result.output); } catch { /* not JSON */ }
-
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        if (parsed._explanation) {
-          setExplanations((prev) => [...prev, { rowIdx: idx, text: String(parsed!._explanation) }]);
-        }
-        const updatedRow: Row = { ...row };
-        for (const col of selectedCols) {
-          if (col in parsed && col !== "_explanation") {
-            updatedRow[col] = parsed[col];
-          }
-        }
-        return { ...updatedRow, ...originals, status: "success", latency_ms: latency };
-      } else if (selectedCols.length === 1) {
-        return { ...row, [selectedCols[0]]: result.output.trim(), ...originals, status: "success", latency_ms: latency };
-      } else {
-        return { ...row, ai_output: result.output, ...originals, status: "success", latency_ms: latency };
-      }
+      return { ...row, ai_output: result.output.trim(), status: "success", latency_ms: result.latency };
     },
-    buildResultEntry: (r: Row, i: number) => {
-      const outputVal = r.ai_output != null
-        ? String(r.ai_output)
-        : JSON.stringify(Object.fromEntries(selectedCols.map((c) => [c, r[c]])));
-      return {
-        rowIndex: i,
-        input: r as Record<string, unknown>,
-        output: outputVal,
-        status: (r.status as string) ?? "success",
-        latency: r.latency_ms as number | undefined,
-        errorMessage: r.error_msg as string | undefined,
-      };
-    },
+    buildResultEntry: (r: Row, i: number) => ({
+      rowIndex: i,
+      input: r as Record<string, unknown>,
+      output: String(r.ai_output ?? ""),
+      status: (r.status as string) ?? "success",
+      latency: r.latency_ms as number | undefined,
+      errorMessage: r.error_msg as string | undefined,
+    }),
     onComplete: () => {
       // no-op; results handled by useBatchProcessor
     },
@@ -235,7 +205,7 @@ export default function TransformPage() {
     setSelectedCols([]);
     setSelectedRows(new Set(entry.data.map((_, i) => i)));
     batchClearResults();
-    setExplanations([]);
+
     toast.success(`Restored "${entry.dataName}"`);
     uploadRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history, pushHistory, batchClearResults, setSelectedCols]);
@@ -246,7 +216,7 @@ export default function TransformPage() {
     setDataName(name);
     setSelectedRows(new Set(newData.map((_, i) => i)));
     batch.clearResults();
-    setExplanations([]);
+
     toast.success(`Loaded ${newData.length} rows from ${name}`);
   };
 
@@ -273,7 +243,7 @@ export default function TransformPage() {
           <p className="text-muted-foreground text-sm">Apply AI transformations to each row of your dataset</p>
         </div>
         {data.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setSelectedCols([]); setSelectedRows(new Set()); setExplanations([]); setSystemPrompt(""); batch.clearResults(); }}>
+          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setSelectedCols([]); setSelectedRows(new Set()); setSystemPrompt(""); batch.clearResults(); }}>
             Start Over
           </Button>
         )}
@@ -452,25 +422,7 @@ export default function TransformPage() {
             )}
           </>
         }
-      >
-        {explanations.length > 0 && (
-          <div className="relative px-4 py-3 rounded-lg bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 text-sm">
-            <button
-              onClick={() => setExplanations([])}
-              className="absolute top-2 right-2 text-blue-400 hover:text-blue-600 dark:hover:text-blue-300 text-lg leading-none px-1"
-              aria-label="Dismiss explanations"
-            >
-              &times;
-            </button>
-            <p className="font-medium mb-1 text-blue-700 dark:text-blue-300">AI Explanations</p>
-            {explanations.map((e, i) => (
-              <p key={i} className="text-xs text-muted-foreground">
-                Row {e.rowIdx + 1}: {e.text}
-              </p>
-            ))}
-          </div>
-        )}
-      </ResultsPanel>
+      />
     </div>
   );
 }

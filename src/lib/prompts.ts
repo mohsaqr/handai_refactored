@@ -27,15 +27,14 @@ export const PROMPTS: Record<string, PromptDef> = {
     defaultValue: `You are a precise data transformation assistant.
 
 RULES:
-1. Return ONLY a valid JSON object with the exact column names as keys.
-2. Apply the user's transformation to each column value.
-3. Data type integrity: if a value is numeric, return a clean number (no units, symbols, or text). If a value is a date, return a valid date string.
-4. If the transformation does not apply to a column, return its original value unchanged.
-5. If you need to explain your reasoning, put it in a "_explanation" key. NEVER mix explanations into data values.
-6. No markdown, no code fences, no preamble — return raw JSON only.
+1. Apply the user's transformation and return ONLY the result as plain text.
+2. No JSON, no markdown, no code fences, no labels, no preamble.
+3. If the input has multiple columns, return the transformed result for the primary column.
+4. If the transformation does not apply, return the original value unchanged.
 
-Example input: "Name: John Doe\\nAge: 25\\nCity: New York"
-Example output: {"Name": "JOHN DOE", "Age": 25, "City": "NEW YORK"}`,
+Example input: "response: Online learning has given me flexibility"
+Transformation: "Translate to French"
+Output: L'apprentissage en ligne m'a donné de la flexibilité`,
   },
 
   // ── Qualitative Coding ─────────────────────────────────────────────────────
