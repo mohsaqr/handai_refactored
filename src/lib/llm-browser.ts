@@ -156,15 +156,17 @@ export async function processRowDirect(params: {
 }): Promise<{ output: string; latency: number }> {
   const aiModel = getModel(params.provider, params.model, params.apiKey, params.baseUrl);
   const start = Date.now();
+  const genOpts: Parameters<typeof generateText>[0] = {
+    model: aiModel,
+    system: params.systemPrompt,
+    prompt: params.userContent,
+    maxOutputTokens: params.maxTokens ?? undefined,
+  };
+  if (params.temperature !== undefined) {
+    genOpts.temperature = params.temperature;
+  }
   const { text } = await withRetry(
-    () =>
-      generateText({
-        model: aiModel,
-        system: params.systemPrompt,
-        prompt: params.userContent,
-        temperature: params.temperature ?? 0,
-        maxOutputTokens: params.maxTokens ?? undefined,
-      }),
+    () => generateText(genOpts),
     { maxAttempts: 3, baseDelayMs: 100 }
   );
   return { output: text, latency: (Date.now() - start) / 1000 };
@@ -211,15 +213,18 @@ export async function generateRowDirect(params: {
     userPrompt = `${params.freeformPrompt ?? "Generate a realistic dataset"}\nGenerate exactly ${params.rowCount} rows.`;
   }
 
+  const genOpts: Parameters<typeof generateText>[0] = {
+    model: aiModel,
+    system: systemPrompt,
+    prompt: userPrompt,
+  };
+  // Some models (reasoning models like o1/gpt-5-nano) don't support temperature
+  if (params.temperature !== undefined) {
+    try { genOpts.temperature = params.temperature; } catch { /* skip if unsupported */ }
+  }
+
   const { text } = await withRetry(
-    () =>
-      generateText({
-        model: aiModel,
-        system: systemPrompt,
-        prompt: userPrompt,
-        temperature: params.temperature ?? 0.7,
-        maxOutputTokens: Math.min(params.rowCount * 200 + 500, 8000),
-      }),
+    () => generateText(genOpts),
     { maxAttempts: 3, baseDelayMs: 200 }
   );
 
@@ -227,8 +232,11 @@ export async function generateRowDirect(params: {
   const expectedCols = params.columns?.map((c) => c.name);
   let rows = parseJsonLines(cleaned, expectedCols);
   if (rows.length === 0) {
-    // Fallback to CSV parsing if LLM ignored JSON instruction
     rows = parseCsv(cleaned, expectedCols);
+  }
+  if (rows.length === 0 && cleaned.length > 0) {
+    // Last resort: treat the entire output as a single-cell row so data isn't lost
+    rows = [{ output: cleaned }];
   }
   return { rows, rawCsv: cleaned, count: rows.length };
 }

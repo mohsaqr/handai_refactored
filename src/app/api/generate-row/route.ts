@@ -150,25 +150,28 @@ export async function POST(req: NextRequest) {
       userPrompt = `${freeformPrompt ?? "Generate a realistic dataset"}\nGenerate exactly ${rowCount} rows.`;
     }
 
+    const genOpts: Parameters<typeof generateText>[0] = {
+      model: aiModel,
+      system: systemPrompt,
+      prompt: userPrompt,
+    };
+    if (temperature !== undefined) {
+      genOpts.temperature = temperature;
+    }
+
     const { text } = await withRetry(
-      () =>
-        generateText({
-          model: aiModel,
-          system: systemPrompt,
-          prompt: userPrompt,
-          temperature: temperature ?? 0.7,
-          maxOutputTokens: Math.min(rowCount * 200 + 500, 8000),
-        }),
+      () => generateText(genOpts),
       { maxAttempts: 3, baseDelayMs: 200 }
     );
 
-    // Strip markdown code fences if present
     const cleaned = text.replace(/^```(?:json(?:l)?|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
     const expectedCols = columns?.map((c) => c.name);
     let rows = parseJsonLines(cleaned, expectedCols);
     if (rows.length === 0) {
-      // Fallback to CSV parsing if LLM ignored JSON instruction
       rows = parseCsv(cleaned, expectedCols);
+    }
+    if (rows.length === 0 && cleaned.length > 0) {
+      rows = [{ output: cleaned }];
     }
 
     return NextResponse.json({ rows, rawCsv: cleaned, count: rows.length });
