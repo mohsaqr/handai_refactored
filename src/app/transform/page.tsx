@@ -113,10 +113,8 @@ export default function TransformPage() {
     }
 
     lines.push("RULES:");
-    lines.push("- Transform the existing column values in-place");
-    lines.push("- Return only the transformed values");
-    lines.push("- Do not include any explanation or commentary — return only the transformed result unless the user explicitly requests an explanation");
-    lines.push("- Do not add new columns unless explicitly asked");
+    lines.push("- Return ONLY a valid JSON object with the selected column names as keys, containing the transformed values");
+    lines.push("- Do not include any explanation or commentary — return only the result");
     lines.push("");
     lines.push(AI_INSTRUCTIONS_MARKER);
 
@@ -149,6 +147,10 @@ export default function TransformPage() {
         return { ...row, status: "skipped", latency_ms: 0 };
       }
 
+      // Save originals before the LLM overwrites them
+      const originals: Row = {};
+      selectedCols.forEach((col) => { originals[`original_${col}`] = row[col]; });
+
       const subset: Row = {};
       selectedCols.forEach((col) => (subset[col] = row[col]));
 
@@ -164,7 +166,6 @@ export default function TransformPage() {
 
       const latency = result.latency;
 
-      // Try to parse structured JSON response for in-place overwrite
       let parsed: Record<string, unknown> | null = null;
       try { parsed = JSON.parse(result.output); } catch { /* not JSON */ }
 
@@ -178,11 +179,11 @@ export default function TransformPage() {
             updatedRow[col] = parsed[col];
           }
         }
-        return { ...updatedRow, status: "success", latency_ms: latency };
+        return { ...updatedRow, ...originals, status: "success", latency_ms: latency };
       } else if (selectedCols.length === 1) {
-        return { ...row, [selectedCols[0]]: result.output.trim(), status: "success", latency_ms: latency };
+        return { ...row, [selectedCols[0]]: result.output.trim(), ...originals, status: "success", latency_ms: latency };
       } else {
-        return { ...row, ai_output: result.output, status: "success", latency_ms: latency };
+        return { ...row, ai_output: result.output, ...originals, status: "success", latency_ms: latency };
       }
     },
     buildResultEntry: (r: Row, i: number) => {
