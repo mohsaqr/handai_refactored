@@ -23,6 +23,8 @@ export interface ProcessingStats {
 
 export interface ProcessingJob {
   isProcessing: boolean;
+  /** True between Stop click and in-flight rows finishing */
+  aborting: boolean;
   runMode: RunMode;
   progress: { completed: number; total: number };
   results: Row[];
@@ -59,8 +61,9 @@ export function currentGeneration(toolId: string): number {
 interface ProcessingState {
   jobs: Record<string, ProcessingJob>;
 
-  /** Start a new batch job — aborts any existing run for this tool */
-  startJob: (toolId: string, mode: RunMode, total: number) => number;
+  /** Start a new batch job — aborts any existing run for this tool.
+   *  When resuming, pass initialCompleted to continue from where we left off. */
+  startJob: (toolId: string, mode: RunMode, total: number, initialCompleted?: number) => number;
 
   /** Increment completed count by 1 */
   incrementProgress: (toolId: string) => void;
@@ -86,7 +89,7 @@ interface ProcessingState {
 export const useProcessingStore = create<ProcessingState>((set) => ({
   jobs: {},
 
-  startJob: (toolId, mode, total) => {
+  startJob: (toolId, mode, total, initialCompleted) => {
     // Abort any existing run
     abortFlags.set(toolId, false);
     const gen = (generations.get(toolId) ?? 0) + 1;
@@ -97,8 +100,9 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
         ...state.jobs,
         [toolId]: {
           isProcessing: true,
+          aborting: false,
           runMode: mode,
-          progress: { completed: 0, total },
+          progress: { completed: initialCompleted ?? 0, total },
           results: [],
           stats: null,
           runId: null,
@@ -151,6 +155,7 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
             startedAt: existing?.startedAt ?? 0,
             generation: existing?.generation ?? 0,
             isProcessing: false,
+            aborting: false,
             results,
             stats,
             runId,
@@ -172,6 +177,16 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
 
   requestAbort: (toolId) => {
     abortFlags.set(toolId, true);
+    set((state) => {
+      const existing = state.jobs[toolId];
+      if (!existing) return state;
+      return {
+        jobs: {
+          ...state.jobs,
+          [toolId]: { ...existing, aborting: true },
+        },
+      };
+    });
   },
 
   setProcessingFlag: (toolId, isProcessing) => {
@@ -191,6 +206,7 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
           ...state.jobs,
           [toolId]: {
             isProcessing: true,
+            aborting: false,
             runMode: "full" as RunMode,
             progress: { completed: 0, total: 0 },
             results: [],

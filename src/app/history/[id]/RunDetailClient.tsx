@@ -51,6 +51,38 @@ export default function RunDetailClient({ id }: { id: string }) {
     const [isDeleting, setIsDeleting] = useState(false);
     const setPendingRestore = useRestoreStore((s) => s.setPending);
 
+    const buildResultRow = (r: RunResult) => {
+        const input = JSON.parse(r.inputJson ?? "{}");
+        const hasAiOutput = Object.keys(input).some((k) => k.startsWith("ai_output"));
+
+        // If output is a JSON object (e.g. automator), spread its fields instead of adding an "output" column
+        let outputFields: Record<string, unknown> = {};
+        if (!hasAiOutput && r.output) {
+            if (typeof r.output === "string") {
+                try {
+                    const parsed = JSON.parse(r.output);
+                    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                        outputFields = parsed;
+                    } else {
+                        outputFields = { output: r.output };
+                    }
+                } catch {
+                    outputFields = { output: r.output };
+                }
+            } else if (typeof r.output === "object") {
+                outputFields = r.output as Record<string, unknown>;
+            }
+        }
+
+        return {
+            ...input,
+            ...outputFields,
+            status: r.status,
+            latency_ms: Math.round((r.latency ?? 0) * 1000),
+            ...(r.errorMessage ? { error_message: r.errorMessage } : {}),
+        };
+    };
+
     useEffect(() => {
         const fetchRunDetail = async () => {
             try {
@@ -60,26 +92,14 @@ export default function RunDetailClient({ id }: { id: string }) {
                     setRun(data.run);
                     const typedResults = data.results as RunResult[];
                     setRawResults(typedResults);
-                    setResults(typedResults.map((r: RunResult) => ({
-                        ...JSON.parse(r.inputJson ?? "{}"),
-                        output: r.output,
-                        status: r.status,
-                        latency_ms: Math.round((r.latency ?? 0) * 1000),
-                        ...(r.errorMessage ? { error_message: r.errorMessage } : {}),
-                    })));
+                    setResults(typedResults.map(buildResultRow));
                 } else {
                     const res = await fetch(`/api/runs/${id}`);
                     const data = await res.json();
                     if (data.error) throw new Error(data.error);
                     setRun(data.run);
                     setRawResults(data.results);
-                    setResults(data.results.map((r: RunResult) => ({
-                        ...JSON.parse(r.inputJson ?? "{}"),
-                        output: r.output,
-                        status: r.status,
-                        latency_ms: Math.round((r.latency ?? 0) * 1000),
-                        ...(r.errorMessage ? { error_message: r.errorMessage } : {}),
-                    })));
+                    setResults(data.results.map(buildResultRow));
                 }
             } catch {
                 toast.error("Failed to load run details");
@@ -115,13 +135,36 @@ export default function RunDetailClient({ id }: { id: string }) {
         const data = rawResults.map((r: RunResult) => JSON.parse(r.inputJson ?? "{}"));
 
         // Build merged result rows (same shape tool pages expect)
-        const mergedResults = rawResults.map((r: RunResult) => ({
-            ...JSON.parse(r.inputJson ?? "{}"),
-            ...(r.output ? { ai_output: r.output, ai_code: r.output } : {}),
-            status: r.status ?? "success",
-            latency_ms: Math.round((r.latency ?? 0) * 1000),
-            ...(r.errorMessage ? { error_msg: r.errorMessage } : {}),
-        }));
+        const mergedResults = rawResults.map((r: RunResult) => {
+            const input = JSON.parse(r.inputJson ?? "{}");
+            const hasAiOutput = Object.keys(input).some((k) => k.startsWith("ai_output"));
+
+            let outputFields: Record<string, unknown> = {};
+            if (!hasAiOutput && r.output) {
+                if (typeof r.output === "string") {
+                    try {
+                        const parsed = JSON.parse(r.output);
+                        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                            outputFields = parsed;
+                        } else {
+                            outputFields = { ai_output: r.output };
+                        }
+                    } catch {
+                        outputFields = { ai_output: r.output };
+                    }
+                } else if (typeof r.output === "object") {
+                    outputFields = r.output as Record<string, unknown>;
+                }
+            }
+
+            return {
+                ...input,
+                ...outputFields,
+                status: r.status ?? "success",
+                latency_ms: Math.round((r.latency ?? 0) * 1000),
+                ...(r.errorMessage ? { error_msg: r.errorMessage } : {}),
+            };
+        });
 
         const payload: RestorePayload = {
             runId: run.id,
@@ -214,8 +257,8 @@ export default function RunDetailClient({ id }: { id: string }) {
                 </div>
             </div>
 
-            <div className="grid md:grid-cols-4 gap-6">
-                <Card className="md:col-span-1">
+            <div className="grid md:grid-cols-5 gap-6">
+                <Card className="md:col-span-1 min-w-0">
                     <CardHeader className="pb-2">
                         <CardTitle className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Run Stats</CardTitle>
                     </CardHeader>
@@ -270,15 +313,14 @@ export default function RunDetailClient({ id }: { id: string }) {
                     </CardContent>
                 </Card>
 
-                <div className="md:col-span-3 space-y-2">
-                    <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-semibold">Processed Results</h3>
-                        <div className="flex items-center gap-2">
-                            <Badge variant="secondary" className="text-[10px]">{results.length} Rows</Badge>
+                <div className="md:col-span-4 min-w-0 overflow-hidden">
+                    <div className="border rounded-lg overflow-hidden">
+                        <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between flex-wrap gap-2">
+                            <span>Processed Results — {results.length} rows</span>
                             <ExportDropdown data={results} filename="run_results" />
                         </div>
+                        <DataTable data={results} />
                     </div>
-                    <DataTable data={results} />
                 </div>
             </div>
 

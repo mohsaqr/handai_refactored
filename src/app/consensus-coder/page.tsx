@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -11,7 +11,7 @@ import { useSystemSettings } from "@/lib/hooks";
 import { useBatchProcessor } from "@/hooks/useBatchProcessor";
 import { useRestoreSession } from "@/hooks/useRestoreSession";
 import { useProcessingStore } from "@/lib/processing-store";
-import { HelpCircle, Plus, X } from "lucide-react";
+import { HelpCircle, Plus, X, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { dispatchConsensusRow } from "@/lib/llm-dispatch";
 import { UploadPreview } from "@/components/tools/UploadPreview";
@@ -20,6 +20,7 @@ import { useColumnSelection } from "@/hooks/useColumnSelection";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
+import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { ExecutionPanel } from "@/components/tools/ExecutionPanel";
 import { ResultsPanel } from "@/components/tools/ResultsPanel";
 
@@ -42,13 +43,13 @@ PROCEDURE:
 3. Favor inclusion when evidence is ambiguous but present.
 4. Produce the final consolidated answer.
 
-OUTPUT: Plain text only. No markdown, no code fences. You may add one sentence explaining a key decision.`;
+OUTPUT: Return ONLY the final answer. No explanations, no reasoning, no commentary.`;
 
 const SAMPLE_JUDGE_PROMPTS: Record<string, string> = {
-  "Strict consensus": `Only accept a result if ALL workers agree. If any worker disagrees, flag the row as "DISAGREEMENT" and do not pick a winner.\n\nRULES:\n- Plain text only, no markdown\n- Output the agreed answer, or "DISAGREEMENT" if workers differ\n- Do NOT add headers or labels`,
-  "Majority vote": `Pick the answer that the majority of workers agree on. If there is a tie, pick the answer from the highest-ranked worker.\n\nRULES:\n- Plain text only, no markdown\n- Output the majority answer directly\n- If tied, prefer Worker 1's answer\n- Add one sentence explaining the vote count`,
-  "Best quality pick": `Evaluate each worker's output for accuracy, completeness, and clarity. Pick the single best response.\n\nRULES:\n- Plain text only, no markdown\n- Output the best answer directly\n- Add one sentence explaining why you chose it\n- Penalize vague, incomplete, or off-topic answers`,
-  "Synthesize all": `Combine the best parts of all worker outputs into one comprehensive answer.\n\nRULES:\n- Plain text only, no markdown\n- Merge insights from all workers into a single coherent response\n- Do not simply copy one worker — synthesize\n- Keep the output concise and well-structured`,
+  "Strict consensus": `Only accept a result if ALL workers agree. If any worker disagrees, flag the row as "DISAGREEMENT" and do not pick a winner.\n\nRULES:\n- Output the agreed answer, or "DISAGREEMENT" if workers differ\n- No explanations, no reasoning, no commentary`,
+  "Majority vote": `Pick the answer that the majority of workers agree on. If there is a tie, pick the answer from the highest-ranked worker.\n\nRULES:\n- Output the majority answer directly\n- If tied, prefer Worker 1's answer\n- No explanations, no reasoning, no commentary`,
+  "Best quality pick": `Evaluate each worker's output for accuracy, completeness, and clarity. Pick the single best response.\n\nRULES:\n- Output the best answer directly\n- No explanations, no reasoning, no commentary`,
+  "Synthesize all": `Combine the best parts of all worker outputs into one comprehensive answer.\n\nRULES:\n- Merge insights from all workers into a single coherent response\n- Do not simply copy one worker — synthesize\n- No explanations, no reasoning, no commentary`,
 };
 
 interface WorkerConfig {
@@ -108,16 +109,16 @@ function WorkerCard({ label, cfg, setCfg, enabledProviders }: {
 }
 
 export default function ConsensusCoderPage() {
-  const [data, setData] = useState<Row[]>([]);
-  const [dataName, setDataName] = useState("");
-  const [workerPrompt, setWorkerPrompt] = useState("");
-  const [judgePrompt, setJudgePrompt] = useState("");
-  const [kappaStats, setKappaStats] = useState<KappaStats | null>(null);
+  const [data, setData] = useSessionState<Row[]>("consensus_data", []);
+  const [dataName, setDataName] = useSessionState("consensus_dataName", "");
+  const [workerPrompt, setWorkerPrompt] = useSessionState("consensus_workerPrompt", "");
+  const [judgePrompt, setJudgePrompt] = useSessionState("consensus_judgePrompt", "");
+  const [kappaStats, setKappaStats] = useSessionState<KappaStats | null>("consensus_kappaStats", null);
 
-  const [extraWorkers, setExtraWorkers] = useState<WorkerConfig[]>([]);
-  const [includeJudgeReasoning, setIncludeJudgeReasoning] = useState(true);
-  const [enableQualityScoring, setEnableQualityScoring] = useState(false);
-  const [enableDisagreementAnalysis, setEnableDisagreementAnalysis] = useState(false);
+  const [extraWorkers, setExtraWorkers] = useSessionState<WorkerConfig[]>("consensus_extraWorkers", []);
+  const [includeJudgeReasoning, setIncludeJudgeReasoning] = useSessionState("consensus_includeJudgeReasoning", true);
+  const [enableQualityScoring, setEnableQualityScoring] = useSessionState("consensus_enableQualityScoring", false);
+  const [enableDisagreementAnalysis, setEnableDisagreementAnalysis] = useSessionState("consensus_enableDisagreementAnalysis", false);
 
   const providers = useAppStore((state) => state.providers);
   const systemSettings = useSystemSettings();
@@ -131,12 +132,24 @@ export default function ConsensusCoderPage() {
   const [worker2, setWorker2] = useState<WorkerConfig>({ providerId: secondId, model: secondModel });
   const [judge, setJudge] = useState<WorkerConfig>({ providerId: firstId, model: firstModel });
 
+  // Sync worker/judge defaults once the Zustand store hydrates from localStorage
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    if (hydratedRef.current || enabledProviders.length === 0) return;
+    hydratedRef.current = true;
+    const p1 = enabledProviders[0];
+    const p2 = enabledProviders[1] ?? p1;
+    setWorker1((prev) => prev.providerId === "openai" && !providers.openai?.isEnabled ? { providerId: p1.providerId, model: p1.defaultModel } : prev);
+    setWorker2((prev) => prev.providerId === (enabledProviders[1]?.providerId ?? "openai") && !providers[prev.providerId]?.isEnabled ? { providerId: p2.providerId, model: p2.defaultModel } : prev);
+    setJudge((prev) => prev.providerId === "openai" && !providers.openai?.isEnabled ? { providerId: p1.providerId, model: p1.defaultModel } : prev);
+  }, [enabledProviders, providers]);
+
   const addWorker = () => setExtraWorkers((prev) => [...prev, { providerId: firstId, model: firstModel }]);
   const removeWorker = (idx: number) => setExtraWorkers((prev) => prev.filter((_, i) => i !== idx));
   const updateExtraWorker = (idx: number, cfg: WorkerConfig) => setExtraWorkers((prev) => prev.map((w, i) => (i === idx ? cfg : w)));
 
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
-  const { selectedCols, toggleCol, toggleAll } = useColumnSelection(allColumns, false);
+  const { selectedCols, setSelectedCols, toggleCol, toggleAll } = useColumnSelection("consensus_selectedCols", allColumns, false);
 
   const buildAutoInstructions = useCallback(() => {
     const lines: string[] = [];
@@ -253,42 +266,49 @@ export default function ConsensusCoderPage() {
       return {
         ...row,
         ...workerCols,
-        judge_best_answer: result.judgeOutput,
+        judge_output: result.judgeOutput,
+        ...(includeJudgeReasoning ? { judge_reasoning: result.consensusType === "Unanimous" ? "Same workers' outputs" : (result.judgeReasoning ?? "") } : {}),
         consensus: result.consensusType,
-        kappa: result.kappa !== null ? Number(result.kappa).toFixed(3) : "N/A",
-        ...(includeJudgeReasoning && result.judgeReasoning ? { judge_reasoning: result.judgeReasoning } : {}),
+        _row_kappa: result.kappa,
+        kappa: "—",
         ...qualityCols,
-        ...(result.disagreementReason ? { disagreement_reason: result.disagreementReason } : {}),
+        ...(enableDisagreementAnalysis ? { disagreement_reason: result.consensusType === "Unanimous" ? "No disagreement" : (result.disagreementReason ?? "") } : {}),
         status: "success",
       };
     },
     buildResultEntry: (r: Row, i: number) => ({
       rowIndex: i,
       input: r as Record<string, unknown>,
-      output: (r.judge_best_answer ?? "") as string,
+      output: (r.judge_output ?? "") as string,
       status: (r.consensus === "Error" ? "error" : "success") as string,
       errorMessage: r.error_msg as string | undefined,
     }),
     onComplete: (results: Row[]) => {
-      // Extract kappa from the last successfully processed row
-      let lastKappa: number | null = null;
-      let lastKappaLabel = "";
-      for (let i = results.length - 1; i >= 0; i--) {
-        const row = results[i];
-        if (row.kappa !== undefined && row.kappa !== "N/A" && row.status !== "error") {
-          lastKappa = parseFloat(row.kappa as string);
-          // Derive label from kappa value
-          if (lastKappa < 0) lastKappaLabel = "Less than chance";
-          else if (lastKappa < 0.21) lastKappaLabel = "Slight";
-          else if (lastKappa < 0.41) lastKappaLabel = "Fair";
-          else if (lastKappa < 0.61) lastKappaLabel = "Moderate";
-          else if (lastKappa < 0.81) lastKappaLabel = "Substantial";
-          else lastKappaLabel = "Almost perfect";
-          break;
+      // Compute running cumulative kappa and write into each row
+      let sum = 0;
+      let count = 0;
+      for (const row of results) {
+        if (row.status === "error" || row.status === "skipped") {
+          row.kappa = "—";
+          continue;
         }
+        const rk = row._row_kappa as number | null;
+        if (rk !== null && rk !== undefined && !isNaN(rk)) {
+          sum += rk;
+          count++;
+        }
+        row.kappa = count > 0 ? (sum / count).toFixed(3) : "—";
       }
-      if (lastKappa !== null) {
-        setKappaStats({ kappa: lastKappa, kappaLabel: lastKappaLabel });
+
+      // Set final cumulative kappa in summary card
+      if (count > 0) {
+        const finalKappa = sum / count;
+        let label = "Very Low";
+        if (finalKappa >= 0.8) label = "Very High";
+        else if (finalKappa >= 0.6) label = "High";
+        else if (finalKappa >= 0.4) label = "Moderate";
+        else if (finalKappa >= 0.2) label = "Low";
+        setKappaStats({ kappa: finalKappa, kappaLabel: label });
       }
     },
   });
@@ -300,7 +320,24 @@ export default function ConsensusCoderPage() {
     queueMicrotask(() => {
       setData(restored.data as Row[]);
       setDataName(restored.dataName);
-      setWorkerPrompt(restored.systemPrompt);
+
+      const fullPrompt = restored.systemPrompt ?? "";
+
+      // Restore worker instructions
+      const workerMatch = fullPrompt.match(/WORKER INSTRUCTIONS:\n([\s\S]*?)(?:\n\n|$)/);
+      setWorkerPrompt(workerMatch ? workerMatch[1].trim() : "");
+
+      // Restore judge instructions
+      const judgeMatch = fullPrompt.match(/JUDGE INSTRUCTIONS:\n([\s\S]*?)(?:\n\n|$)/);
+      if (judgeMatch) setJudgePrompt(judgeMatch[1].trim());
+
+      // Restore selected columns
+      const colsMatch = fullPrompt.match(/COLUMNS: (.+)/);
+      if (colsMatch) {
+        const cols = colsMatch[1].split(",").map((c) => c.trim()).filter(Boolean);
+        if (cols.length > 0) setSelectedCols(cols);
+      }
+
       // Populate results in global processing store
       const errors = restored.results.filter((r) => r.status === "error").length;
       useProcessingStore.getState().completeJob(
@@ -336,12 +373,13 @@ export default function ConsensusCoderPage() {
           <p className="text-muted-foreground text-sm">Multi-model consensus coding with inter-rater reliability (Cohen&apos;s Kappa)</p>
         </div>
         {data.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setWorkerPrompt(""); setJudgePrompt(""); setKappaStats(null); batch.clearResults(); }}>
-            Start Over
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("consensus_"); setData([]); setDataName(""); setWorkerPrompt(""); setJudgePrompt(""); setKappaStats(null); setExtraWorkers([]); setIncludeJudgeReasoning(true); setEnableQualityScoring(false); setEnableDisagreementAnalysis(false); setAiInstructions(""); batch.clearResults(); }}>
+            <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
         )}
       </div>
 
+      <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
@@ -378,7 +416,6 @@ export default function ConsensusCoderPage() {
           selectedCols={selectedCols}
           onToggleCol={toggleCol}
           onToggleAll={toggleAll}
-          accentColor="accent-purple-500"
           description="Choose which columns to send to each worker model for coding."
           emptyMessage="Upload data first to see available columns."
         />
@@ -394,29 +431,24 @@ export default function ConsensusCoderPage() {
           <div className="grid grid-cols-2 gap-8">
             <WorkerCard label="Worker 1" cfg={worker1} setCfg={setWorker1} enabledProviders={enabledProviders} />
             <WorkerCard label="Worker 2" cfg={worker2} setCfg={setWorker2} enabledProviders={enabledProviders} />
-          </div>
-
-          {extraWorkers.map((ew, idx) => (
-            <div key={idx} className="border-t pt-5">
-              <div className="grid grid-cols-2 gap-8">
-                <div className="relative">
-                  <WorkerCard label={`Worker ${idx + 3}`} cfg={ew} setCfg={(cfg) => updateExtraWorker(idx, cfg)} enabledProviders={enabledProviders} />
-                  <button
-                    onClick={() => removeWorker(idx)}
-                    className="absolute top-0 right-0 text-muted-foreground hover:text-destructive"
-                    title={`Remove Worker ${idx + 3}`}
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-                <div />
+            {extraWorkers.map((ew, idx) => (
+              <div key={idx} className="relative">
+                <WorkerCard label={`Worker ${idx + 3}`} cfg={ew} setCfg={(cfg) => updateExtraWorker(idx, cfg)} enabledProviders={enabledProviders} />
+                <button
+                  onClick={() => removeWorker(idx)}
+                  className="absolute top-0 right-0 text-muted-foreground hover:text-destructive"
+                  title={`Remove Worker ${idx + 3}`}
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </div>
+            ))}
+            <div className="col-start-1 flex items-start pt-1">
+              <Button variant="outline" size="sm" className="text-xs" onClick={addWorker}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" /> Add Worker
+              </Button>
             </div>
-          ))}
-
-          <Button variant="outline" size="sm" className="text-xs" onClick={addWorker}>
-            <Plus className="h-3.5 w-3.5 mr-1.5" /> Add Worker
-          </Button>
+          </div>
 
           <div className="border-t pt-5">
             <WorkerCard label="Judge" cfg={judge} setCfg={setJudge} enabledProviders={enabledProviders} />
@@ -492,6 +524,8 @@ export default function ConsensusCoderPage() {
         onChange={setAiInstructions}
       />
 
+      </div>
+
       <div className="border-t" />
 
       {/* ── 6. Execute ────────────────────────────────────────────────────── */}
@@ -499,6 +533,7 @@ export default function ConsensusCoderPage() {
         <h2 className="text-2xl font-bold">6. Execute</h2>
         <ExecutionPanel
           isProcessing={batch.isProcessing}
+          aborting={batch.aborting}
           runMode={batch.runMode}
           progress={batch.progress}
           etaStr={batch.etaStr}
@@ -507,8 +542,9 @@ export default function ConsensusCoderPage() {
           onRun={batch.run}
           onAbort={batch.abort}
           onResume={batch.resume}
+          onCancel={batch.clearResults}
           failedCount={batch.failedCount}
-          progressColor="bg-purple-500"
+          skippedCount={batch.skippedCount}
         />
       </div>
 

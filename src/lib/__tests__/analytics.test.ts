@@ -46,33 +46,29 @@ describe('interpretKappa', () => {
     expect(interpretKappa(NaN)).toBe('N/A');
   });
 
-  it('returns Poor for negative kappa', () => {
-    expect(interpretKappa(-0.1)).toBe('Poor (< 0)');
+  it('returns Very Low for k in [0, 0.20)', () => {
+    expect(interpretKappa(0.0)).toBe('Very Low (0–0.19)');
+    expect(interpretKappa(0.19)).toBe('Very Low (0–0.19)');
   });
 
-  it('returns Slight for k in [0, 0.20)', () => {
-    expect(interpretKappa(0.0)).toBe('Slight (0–0.20)');
-    expect(interpretKappa(0.19)).toBe('Slight (0–0.20)');
-  });
-
-  it('returns Fair for k in [0.20, 0.40)', () => {
-    expect(interpretKappa(0.2)).toBe('Fair (0.21–0.40)');
-    expect(interpretKappa(0.39)).toBe('Fair (0.21–0.40)');
+  it('returns Low for k in [0.20, 0.40)', () => {
+    expect(interpretKappa(0.2)).toBe('Low (0.20–0.39)');
+    expect(interpretKappa(0.39)).toBe('Low (0.20–0.39)');
   });
 
   it('returns Moderate for k in [0.40, 0.60)', () => {
-    expect(interpretKappa(0.4)).toBe('Moderate (0.41–0.60)');
-    expect(interpretKappa(0.59)).toBe('Moderate (0.41–0.60)');
+    expect(interpretKappa(0.4)).toBe('Moderate (0.40–0.59)');
+    expect(interpretKappa(0.59)).toBe('Moderate (0.40–0.59)');
   });
 
-  it('returns Substantial for k in [0.60, 0.80)', () => {
-    expect(interpretKappa(0.6)).toBe('Substantial (0.61–0.80)');
-    expect(interpretKappa(0.79)).toBe('Substantial (0.61–0.80)');
+  it('returns High for k in [0.60, 0.80)', () => {
+    expect(interpretKappa(0.6)).toBe('High (0.60–0.79)');
+    expect(interpretKappa(0.79)).toBe('High (0.60–0.79)');
   });
 
-  it('returns Almost Perfect for k >= 0.80', () => {
-    expect(interpretKappa(0.8)).toBe('Almost Perfect (0.81–1.00)');
-    expect(interpretKappa(1.0)).toBe('Almost Perfect (0.81–1.00)');
+  it('returns Very High for k >= 0.80', () => {
+    expect(interpretKappa(0.8)).toBe('Very High (0.80–1.00)');
+    expect(interpretKappa(1.0)).toBe('Very High (0.80–1.00)');
   });
 });
 

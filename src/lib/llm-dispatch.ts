@@ -15,6 +15,7 @@ import {
   automatorRowDirect,
   documentExtractDirect,
   documentAnalyzeDirect,
+  documentProcessDirect,
 } from "./llm-browser";
 import type { ConsensusResult } from "./llm-browser";
 import { createRun as idbCreateRun, saveResults as idbSaveResults } from "./db-indexeddb";
@@ -371,6 +372,51 @@ export async function dispatchDocumentAnalyze(params: {
         apiKey: params.apiKey,
         baseUrl: params.baseUrl,
         hint: params.hint,
+      }),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `Server error ${res.status}`);
+    }
+    return await res.json();
+  }
+}
+
+// ── Document processing (throws on error) ───────────────────────────────────
+
+export async function dispatchDocumentProcess(params: {
+  file: File;
+  provider: string;
+  model: string;
+  apiKey: string;
+  baseUrl?: string;
+  systemPrompt: string;
+}): Promise<{
+  text: string;
+  fileName: string;
+  charCount: number;
+  truncated: boolean;
+}> {
+  if (useBrowserDirect) {
+    return await documentProcessDirect(params);
+  } else {
+    // Extract text in browser (pdfjs-dist works in browser but fails server-side)
+    const { extractTextBrowser } = await import("./document-browser");
+    const { text: rawText } = await extractTextBrowser(params.file);
+    const fileContent = btoa(unescape(encodeURIComponent(rawText)));
+
+    const res = await fetch("/api/document-process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fileContent,
+        fileType: "txt",
+        fileName: params.file.name,
+        provider: params.provider,
+        model: params.model,
+        apiKey: params.apiKey,
+        baseUrl: params.baseUrl,
+        systemPrompt: params.systemPrompt,
       }),
     });
     if (!res.ok) {

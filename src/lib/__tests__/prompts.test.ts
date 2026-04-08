@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { PROMPTS, getPrompt, getPromptsByCategory } from '../prompts';
 
 describe('PROMPTS registry', () => {
-  it('contains all 18 expected prompt IDs', () => {
+  it('contains all 21 expected prompt IDs', () => {
     const expectedIds = [
       'transform.default',
       'qualitative.default',
@@ -17,16 +17,19 @@ describe('PROMPTS registry', () => {
       'generate.column_suggestions',
       'generate.csv_with_cols',
       'generate.csv_freeform',
+      'generate.freetext',
+      'generate.markdown',
       'automator.rules',
       'ai_coder.suggestions',
       'screener.default',
       'document.extraction',
+      'document.process',
       'document.analysis',
     ];
     for (const id of expectedIds) {
       expect(PROMPTS[id], `Missing prompt: ${id}`).toBeDefined();
     }
-    expect(Object.keys(PROMPTS)).toHaveLength(18);
+    expect(Object.keys(PROMPTS)).toHaveLength(21);
   });
 
   it('each entry has id matching its key', () => {
@@ -66,9 +69,9 @@ describe('getPromptsByCategory', () => {
     expect(prompts).toHaveLength(3);
   });
 
-  it('returns 3 generate prompts', () => {
+  it('returns 5 generate prompts', () => {
     const prompts = getPromptsByCategory('generate');
-    expect(prompts).toHaveLength(3);
+    expect(prompts).toHaveLength(5);
   });
 
   it('returns 1 automator prompt', () => {
@@ -87,11 +90,12 @@ describe('getPromptsByCategory', () => {
     expect(prompts[0].id).toBe('screener.default');
   });
 
-  it('returns 2 document prompts', () => {
+  it('returns 3 document prompts', () => {
     const prompts = getPromptsByCategory('document');
-    expect(prompts).toHaveLength(2);
+    expect(prompts).toHaveLength(3);
     const ids = prompts.map((p) => p.id);
     expect(ids).toContain('document.extraction');
+    expect(ids).toContain('document.process');
     expect(ids).toContain('document.analysis');
   });
 
@@ -111,7 +115,7 @@ describe('getPrompt', () => {
     expect(getPrompt('does.not.exist')).toBe('');
   });
 
-  it('returns non-empty strings for all 18 registered prompts', () => {
+  it('returns non-empty strings for all 19 registered prompts', () => {
     for (const id of Object.keys(PROMPTS)) {
       expect(getPrompt(id).length, `Empty prompt for: ${id}`).toBeGreaterThan(0);
     }

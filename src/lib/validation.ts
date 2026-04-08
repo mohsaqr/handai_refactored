@@ -34,6 +34,7 @@ export const ConsensusRowSchema = z.object({
   runId: z.string().optional(),
   enableQualityScoring: z.boolean().optional(),
   enableDisagreementAnalysis: z.boolean().optional(),
+  includeReasoning: z.boolean().optional(),
 });
 
 // ── /api/comparison-row ───────────────────────────────────────────────────────
@@ -91,6 +92,7 @@ export const GenerateRowSchema = z.object({
     })
   ).optional(),
   freeformPrompt: z.string().optional(),
+  outputFormat: z.enum(["tabular", "json", "freetext", "markdown"]).optional(),
   temperature: z.number().min(0).max(2).optional(),
 });
 
@@ -127,6 +129,18 @@ export const DocumentAnalyzeSchema = z.object({
   apiKey: z.string().default(""),
   baseUrl: z.string().optional(),
   hint: z.string().optional(),
+});
+
+// ── /api/document-process ─────────────────────────────────────────────────────
+export const DocumentProcessSchema = z.object({
+  fileContent: z.string().min(1),
+  fileType: DocumentFileTypeEnum,
+  fileName: z.string().optional(),
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  apiKey: z.string().default(""),
+  baseUrl: z.string().optional(),
+  systemPrompt: z.string().min(1),
 });
 
 // ── /api/runs POST ────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ import * as XLSX from "xlsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useActiveModel, useSystemSettings } from "@/lib/hooks";
-import { Plus, Trash2, Upload } from "lucide-react";
+import { Plus, Trash2, Upload, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 
 import { usePersistedPrompt } from "@/hooks/usePersistedPrompt";
@@ -15,6 +15,7 @@ import { useColumnSelection } from "@/hooks/useColumnSelection";
 import { useBatchProcessor } from "@/hooks/useBatchProcessor";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 import { useRestoreSession } from "@/hooks/useRestoreSession";
+import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { dispatchProcessRow } from "@/lib/llm-dispatch";
 import { useProcessingStore } from "@/lib/processing-store";
 
@@ -120,17 +121,21 @@ function parseCSVLine(line: string): string[] {
 }
 
 export default function QualitativeCoderPage() {
-  const [data, setData] = useState<Row[]>([]);
-  const [dataName, setDataName] = useState("");
+  const [data, setData] = useSessionState<Row[]>("qualcoder_data", []);
+  const [dataName, setDataName] = useSessionState("qualcoder_dataName", "");
   const [systemPrompt, setSystemPrompt] = usePersistedPrompt("handai_prompt_qualcoder", DEFAULT_PROMPT);
-  const [codebook, setCodebook] = useState<CodeEntry[]>([]);
+  const [codebook, setCodebook] = useSessionState<CodeEntry[]>("qualcoder_codebook", [
+    { id: crypto.randomUUID(), code: "", description: "", example: "" },
+    { id: crypto.randomUUID(), code: "", description: "", example: "" },
+    { id: crypto.randomUUID(), code: "", description: "", example: "" },
+  ]);
   const [, setIsMounted] = useState(false);
   const csvImportRef = useRef<HTMLInputElement>(null);
 
   const provider = useActiveModel();
   const systemSettings = useSystemSettings();
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
-  const { selectedCols, toggleCol, toggleAll } = useColumnSelection(allColumns, false);
+  const { selectedCols, setSelectedCols, toggleCol, toggleAll } = useColumnSelection("qualcoder_selectedCols", allColumns, false);
 
   useEffect(() => {
     queueMicrotask(() => setIsMounted(true));
@@ -221,7 +226,48 @@ export default function QualitativeCoderPage() {
     queueMicrotask(() => {
       setData(restored.data);
       setDataName(restored.dataName);
-      setSystemPrompt(restored.systemPrompt);
+
+      const fullPrompt = restored.systemPrompt ?? "";
+
+      // Extract coding instructions from saved AI instructions
+      const instrMatch = fullPrompt.match(/CODING INSTRUCTIONS:\n([\s\S]*?)(?:\n\n|$)/);
+      setSystemPrompt(instrMatch ? instrMatch[1].trim() : fullPrompt);
+
+      // Restore selected columns
+      const colsMatch = fullPrompt.match(/SELECTED COLUMNS:\n([\s\S]*?)(?:\n\n|$)/);
+      if (colsMatch) {
+        const cols = colsMatch[1].split("\n").map((l) => l.replace(/^- /, "").trim()).filter(Boolean);
+        if (cols.length > 0) setSelectedCols(cols);
+      }
+
+      // Restore codebook from saved AI instructions
+      const cbMatch = fullPrompt.match(/CODEBOOK:\n([\s\S]*?)(?:\n\nRULES:|$)/);
+      if (cbMatch) {
+        const entries: CodeEntry[] = [];
+        const cbLines = cbMatch[1].trim().split("\n");
+        let currentCode = "";
+        let currentDesc = "";
+        let currentExample = "";
+        for (const line of cbLines) {
+          const codeMatch = line.match(/^\d+\.\s+(.+?)(?:\s+—\s+(.*))?$/);
+          if (codeMatch) {
+            if (currentCode) {
+              entries.push({ id: crypto.randomUUID(), code: currentCode, description: currentDesc, example: currentExample });
+            }
+            currentCode = codeMatch[1].trim();
+            currentDesc = codeMatch[2]?.trim() ?? "";
+            currentExample = "";
+          } else {
+            const exMatch = line.match(/^\s+Example:\s+"(.+)"$/);
+            if (exMatch) currentExample = exMatch[1];
+          }
+        }
+        if (currentCode) {
+          entries.push({ id: crypto.randomUUID(), code: currentCode, description: currentDesc, example: currentExample });
+        }
+        if (entries.length > 0) setCodebook(entries);
+      }
+
       const errors = restored.results.filter((r) => r.status === "error").length;
       useProcessingStore.getState().completeJob(
         "/qualitative-coder",
@@ -236,7 +282,7 @@ export default function QualitativeCoderPage() {
   const handleDataLoaded = (newData: Row[], name: string) => {
     setData(newData);
     setDataName(name);
-    setCodebook([]);
+    setCodebook([{ id: crypto.randomUUID(), code: "", description: "", example: "" }, { id: crypto.randomUUID(), code: "", description: "", example: "" }, { id: crypto.randomUUID(), code: "", description: "", example: "" }]);
     batch.clearResults();
     toast.success(`Loaded ${newData.length} rows from ${name}`);
   };
@@ -334,12 +380,13 @@ export default function QualitativeCoderPage() {
           <p className="text-muted-foreground text-sm">AI-assisted qualitative coding — apply codes to each row of your dataset</p>
         </div>
         {data.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setCodebook([]); setSystemPrompt(""); batch.clearResults(); }}>
-            Start Over
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("qualcoder_"); setData([]); setDataName(""); setCodebook([{ id: crypto.randomUUID(), code: "", description: "", example: "" }, { id: crypto.randomUUID(), code: "", description: "", example: "" }, { id: crypto.randomUUID(), code: "", description: "", example: "" }]); setSystemPrompt(""); setAiInstructions(""); batch.clearResults(); }}>
+            <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
         )}
       </div>
 
+      <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
@@ -375,7 +422,6 @@ export default function QualitativeCoderPage() {
           selectedCols={selectedCols}
           onToggleCol={toggleCol}
           onToggleAll={toggleAll}
-          accentColor="accent-violet-500"
           description="Choose which columns contain the text to be coded."
         />
       </div>
@@ -394,7 +440,7 @@ export default function QualitativeCoderPage() {
           <div className="flex items-center gap-2">
             <input ref={csvImportRef} type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden" onChange={importCodebook} />
             <Button variant="outline" size="sm" onClick={() => csvImportRef.current?.click()}>
-              <Upload className="h-3.5 w-3.5 mr-1.5" />Import
+              <Upload className="h-3.5 w-3.5 mr-1.5" />Import CSV
             </Button>
             <Button variant="outline" size="sm" disabled={codebook.length === 0} onClick={exportCodebookCSV}>
               <Upload className="h-3.5 w-3.5 mr-1.5" />Export CSV
@@ -417,38 +463,32 @@ export default function QualitativeCoderPage() {
         </div>
 
         <div className="border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b bg-muted/20">
-                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[22%]">Code</th>
-                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[38%]">Description</th>
-                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[34%]">Example</th>
-                <th className="px-2 py-2 w-8" />
-              </tr>
-            </thead>
-            <tbody>
-              {codebook.length === 0 ? (
-                <tr><td colSpan={4} className="text-center py-10 text-xs text-muted-foreground italic">No codes yet — click &ldquo;Add Code&rdquo; below or import a CSV file.</td></tr>
-              ) : (
-                codebook.map((entry) => (
-                  <tr key={entry.id} className="border-b last:border-0 hover:bg-muted/10 transition-colors">
-                    <td className="px-2 py-1.5"><Input value={entry.code} onChange={(e) => updateCode(entry.id, "code", e.target.value)} placeholder="Code label" className="h-7 text-sm font-medium px-2" /></td>
-                    <td className="px-2 py-1.5"><Input value={entry.description} onChange={(e) => updateCode(entry.id, "description", e.target.value)} placeholder="What this code means…" className="h-7 text-sm px-2" /></td>
-                    <td className="px-2 py-1.5"><Input value={entry.example} onChange={(e) => updateCode(entry.id, "example", e.target.value)} placeholder="e.g. an illustrative quote" className="h-7 text-sm px-2" /></td>
-                    <td className="px-2 py-1.5 text-center">
-                      <button onClick={() => deleteCode(entry.id)} className="text-muted-foreground hover:text-destructive transition-colors p-0.5" aria-label="Delete code">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-          <div className="px-3 py-2 border-t bg-muted/5">
-            <button onClick={addCode} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
-              <Plus className="h-3.5 w-3.5" /> Add Code
-            </button>
+          <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Codebook</div>
+          <div className="p-3 space-y-2">
+            {codebook.length === 0 ? (
+              <p className="text-center py-8 text-xs text-muted-foreground italic">No codes yet — click &ldquo;Add Code&rdquo; below or import a CSV file.</p>
+            ) : (
+              codebook.map((entry) => (
+                <div key={entry.id} className="flex gap-2 items-center">
+                  <Input value={entry.code} onChange={(e) => updateCode(entry.id, "code", e.target.value)} placeholder="Code label" className="flex-[2] h-8 text-xs" />
+                  <Input value={entry.description} onChange={(e) => updateCode(entry.id, "description", e.target.value)} placeholder="Description" className="flex-[3] h-8 text-xs" />
+                  <Input value={entry.example} onChange={(e) => updateCode(entry.id, "example", e.target.value)} placeholder="Example quote" className="flex-[3] h-8 text-xs" />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
+                    onClick={() => deleteCode(entry.id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="px-3 pb-3">
+            <Button variant="outline" size="sm" className="w-full text-xs" onClick={addCode}>
+              <Plus className="h-3 w-3 mr-2" /> Add Code
+            </Button>
           </div>
         </div>
       </div>
@@ -464,6 +504,8 @@ export default function QualitativeCoderPage() {
         <NoModelWarning activeModel={provider} />
       </AIInstructionsSection>
 
+      </div>
+
       <div className="border-t" />
 
       {/* ── 5. Execute ────────────────────────────────────────────────────── */}
@@ -471,6 +513,7 @@ export default function QualitativeCoderPage() {
         <h2 className="text-2xl font-bold">5. Execute</h2>
         <ExecutionPanel
           isProcessing={batch.isProcessing}
+          aborting={batch.aborting}
           runMode={batch.runMode}
           progress={batch.progress}
           etaStr={batch.etaStr}
@@ -479,8 +522,9 @@ export default function QualitativeCoderPage() {
           onRun={batch.run}
           onAbort={batch.abort}
           onResume={batch.resume}
+          onCancel={batch.clearResults}
           failedCount={batch.failedCount}
-          progressColor="bg-violet-500"
+          skippedCount={batch.skippedCount}
           showSuccessErrors
           successCount={batch.stats?.success ?? 0}
           errorCount={batch.stats?.errors ?? 0}

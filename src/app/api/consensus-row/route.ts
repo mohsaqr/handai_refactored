@@ -3,7 +3,7 @@ import { generateText } from "ai";
 import { getModel } from "@/lib/ai/providers";
 import { withRetry } from "@/lib/retry";
 import { ConsensusRowSchema } from "@/lib/validation";
-import { cohenKappa, pairwiseAgreement } from "@/lib/analytics";
+import { multiWorkerKappa, pairwiseAgreement } from "@/lib/analytics";
 import prisma from "@/lib/prisma";
 
 export async function POST(req: NextRequest) {
@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
       runId,
       enableQualityScoring,
       enableDisagreementAnalysis,
+      includeReasoning,
     } = parsed.data;
 
     // Enforce direct-answer-only rules on every worker prompt
@@ -74,20 +75,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Step 2: Inter-rater analytics on single-token outputs
+    // Step 2: Inter-rater analytics (all workers, set-based)
     const outputs = workerResults.map((r) => r.output.trim());
     const allSame = outputs.every((o) => o === outputs[0]);
-    const consensusType = allSame ? "Full Agreement" : "Disagreement (Synthesized)";
+    const kappa = multiWorkerKappa(outputs);
 
-    // Cohen's Kappa on first two workers (character-level for multi-label)
-    const w1Tokens = outputs[0].split(/[,\n]+/).map((s) => s.trim()).filter(Boolean);
-    const w2Tokens = outputs[1].split(/[,\n]+/).map((s) => s.trim()).filter(Boolean);
-    const maxLen = Math.max(w1Tokens.length, w2Tokens.length);
-    const a = w1Tokens.concat(new Array(Math.max(0, maxLen - w1Tokens.length)).fill(""));
-    const b = w2Tokens.concat(new Array(Math.max(0, maxLen - w2Tokens.length)).fill(""));
-    const kappa = cohenKappa(a, b);
-
-    // Full pairwise matrix when > 2 workers
+    // Pairwise matrix for detailed view
     const allTokenized = outputs.map((o) =>
       o
         .split(/[,\n]+/)
@@ -100,7 +93,7 @@ export async function POST(req: NextRequest) {
     );
     const agreementMatrix = pairwiseAgreement(padded);
 
-    // Step 3: Run judge
+    // Step 3: Run judge — also classify consensus level
     const judgeModel = getModel(
       judge.provider,
       judge.model,
@@ -112,17 +105,63 @@ export async function POST(req: NextRequest) {
       .join("\n\n---\n\n");
     const combinedContent = `Original Data: ${userContent}\n\nWorker Responses:\n${workersFormatted}`;
 
-    const judgeStart = Date.now();
-    const { text: judgeOutput } = await withRetry(
-      () =>
-        generateText({
-          model: judgeModel,
-          system: judgePrompt,
-          prompt: combinedContent,
-        }),
-      { maxAttempts: 3, baseDelayMs: 100 }
-    );
-    const judgeLatency = (Date.now() - judgeStart) / 1000;
+    let judgeOutput: string;
+    let judgeLatency: number;
+    let consensusType: string;
+    let judgeReasoning: string | undefined;
+
+    const judgeDirectSuffix = `\n\nSTRICT OUTPUT RULES (always apply):
+- Output ONLY the final answer. No explanations, no reasoning, no commentary, no justifications.
+- Plain text only. No markdown, no headings, no bullet points, no code fences.
+- Do NOT explain why you chose this answer — just give the answer directly.`;
+
+    if (allSame) {
+      consensusType = "Unanimous";
+      const judgeStart = Date.now();
+      const { text } = await withRetry(
+        () =>
+          generateText({
+            model: judgeModel,
+            system: judgePrompt + judgeDirectSuffix,
+            prompt: combinedContent,
+          }),
+        { maxAttempts: 3, baseDelayMs: 100 }
+      );
+      judgeOutput = text;
+      judgeLatency = (Date.now() - judgeStart) / 1000;
+    } else {
+      const consensusSuffix = judgeDirectSuffix + `\n\nADDITIONAL TASK — After producing your direct answer, you MUST end your response with a consensus classification on its own line, in this exact format:
+[CONSENSUS: <level>]
+Where <level> is one of:
+- "Unanimous" — all workers conveyed the same meaning (even if worded differently)
+- "Strong Agreement" — workers mostly agree with only minor differences in detail or phrasing
+- "Partial Agreement" — workers agree on some points but differ on others
+- "Divergent" — workers gave substantially different or contradictory responses`;
+
+      const judgeStart = Date.now();
+      const { text: rawJudge } = await withRetry(
+        () =>
+          generateText({
+            model: judgeModel,
+            system: judgePrompt + consensusSuffix,
+            prompt: combinedContent,
+          }),
+        { maxAttempts: 3, baseDelayMs: 100 }
+      );
+      judgeLatency = (Date.now() - judgeStart) / 1000;
+
+      // Parse [CONSENSUS: ...] — tolerant of missing ], quotes, trailing whitespace
+      const consensusMatch = rawJudge.match(/\[CONSENSUS:\s*"?([^"\]\n]+)"?\]?\s*$/im);
+      if (consensusMatch) {
+        const level = consensusMatch[1].trim();
+        const valid = ["Unanimous", "Strong Agreement", "Partial Agreement", "Divergent"];
+        consensusType = valid.includes(level) ? level : "Partial Agreement";
+        judgeOutput = rawJudge.slice(0, consensusMatch.index).trim();
+      } else {
+        consensusType = "Partial Agreement";
+        judgeOutput = rawJudge.trim();
+      }
+    }
 
     const totalLatency = judgeLatency + Math.max(...workerResults.map((r) => r.latency));
 
@@ -134,8 +173,22 @@ export async function POST(req: NextRequest) {
           () =>
             generateText({
               model: judgeModel,
-              system: `You are a quality assessor. Rate each worker response on a scale of 1-10 for accuracy and completeness. Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is 1-10.`,
-              prompt: `Original Data: ${userContent}\n\nWorker Responses:\n${workersFormatted}`,
+              system: `You are a quality assessor evaluating worker responses. Rate each worker on a scale of 1-10.
+
+SCORING CRITERIA:
+- Accuracy (does the response correctly address the original data?)
+- Completeness (does it cover all relevant aspects?)
+- Relevance (does it stay focused on the task?)
+- Alignment with best answer (how close is it to the chosen judge output?)
+
+RULES:
+- If all workers gave the same answer, they should all receive the same score.
+- A response that matches the judge's chosen answer closely should score higher.
+- Deduct points for: factual errors, missing key information, off-topic content, unnecessary additions.
+- Be consistent: similar quality responses should get similar scores.
+
+Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is 1-10. No other text.`,
+              prompt: `Original Data: ${userContent}\n\nWorker Responses:\n${workersFormatted}\n\nJudge's Chosen Answer:\n${judgeOutput}\n\nConsensus Level: ${consensusType}`,
             }),
           { maxAttempts: 2, baseDelayMs: 100 }
         );
@@ -149,9 +202,27 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Step 5 (optional): Disagreement analysis
+    // Step 5 (optional): Judge reasoning — separate call for reliability
+    if (includeReasoning && consensusType !== "Unanimous") {
+      try {
+        const { text: jrText } = await withRetry(
+          () =>
+            generateText({
+              model: judgeModel,
+              system: `You are a judge explaining your decision. Given the original data, the worker responses, and your chosen best answer, explain in one or two sentences why you chose this answer over the alternatives. Return ONLY the explanation, no labels or prefixes.`,
+              prompt: `Original Data: ${userContent}\n\nWorker Responses:\n${workersFormatted}\n\nChosen Answer:\n${judgeOutput}`,
+            }),
+          { maxAttempts: 2, baseDelayMs: 100 }
+        );
+        judgeReasoning = jrText.trim() || "Could not generate reasoning";
+      } catch {
+        judgeReasoning = "Could not generate reasoning";
+      }
+    }
+
+    // Step 6 (optional): Disagreement analysis
     let disagreementReason: string | undefined;
-    if (enableDisagreementAnalysis && consensusType !== "Full Agreement") {
+    if (enableDisagreementAnalysis && consensusType !== "Unanimous") {
       try {
         const { text: drText } = await withRetry(
           () =>
@@ -162,9 +233,9 @@ export async function POST(req: NextRequest) {
             }),
           { maxAttempts: 2, baseDelayMs: 100 }
         );
-        disagreementReason = drText.trim();
+        disagreementReason = drText.trim() || "Could not analyze disagreement";
       } catch {
-        // non-fatal
+        disagreementReason = "Could not analyze disagreement";
       }
     }
 
@@ -187,8 +258,9 @@ export async function POST(req: NextRequest) {
       judgeLatency,
       consensusType,
       kappa: isNaN(kappa) ? null : kappa,
-      kappaLabel: isNaN(kappa) ? "N/A" : kappa < 0.2 ? "Poor" : kappa < 0.4 ? "Fair" : kappa < 0.6 ? "Moderate" : kappa < 0.8 ? "Substantial" : "Almost Perfect",
+      kappaLabel: isNaN(kappa) ? "N/A" : kappa < 0.2 ? "Very Low" : kappa < 0.4 ? "Low" : kappa < 0.6 ? "Moderate" : kappa < 0.8 ? "High" : "Very High",
       agreementMatrix,
+      ...(judgeReasoning !== undefined ? { judgeReasoning } : {}),
       ...(qualityScores !== undefined ? { qualityScores } : {}),
       ...(disagreementReason !== undefined ? { disagreementReason } : {}),
     });

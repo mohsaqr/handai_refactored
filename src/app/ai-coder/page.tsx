@@ -10,7 +10,8 @@ import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useActiveModel, useSystemSettings } from "@/lib/hooks";
 import { useBatchProcessor } from "@/hooks/useBatchProcessor";
 import { useRestoreSession } from "@/hooks/useRestoreSession";
-import { Plus, Trash2, Upload, Save, FolderOpen, BarChart2, Download, Check, Loader2, X, ChevronDown } from "lucide-react";
+import { Plus, Trash2, Upload, Save, FolderOpen, BarChart2, Download, Check, Loader2, X, ChevronDown, ChevronRight, ChevronLeft, RotateCcw, Play } from "lucide-react";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -18,6 +19,7 @@ import { toast } from "sonner";
 
 import { usePersistedPrompt } from "@/hooks/usePersistedPrompt";
 import { useColumnSelection } from "@/hooks/useColumnSelection";
+import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { dispatchProcessRow } from "@/lib/llm-dispatch";
 
 import { UploadPreview } from "@/components/tools/UploadPreview";
@@ -276,17 +278,34 @@ function applyAllHighlights(text: string, codes: string[], highlightsMap: Record
 }
 
 // ─── AI response parser ──────────────────────────────────────────────────────
-function parseAIResponse(output: string, codebookCodes?: string[]): { codes: string[]; confidence: Record<string, number> } {
+function parseAIResponse(output: string, codebookCodes?: string[]): { codes: string[]; confidence: Record<string, number>; reasoning?: string } {
   let confidence: Record<string, number> = {};
+  let reasoning: string | undefined;
   try {
     const jsonStr = output.replace(/^```json?\s*/i, "").replace(/\s*```$/, "").trim();
     const parsed = JSON.parse(jsonStr);
     if (typeof parsed === "object" && parsed !== null) {
-      // Strip descriptions from keys (LLMs sometimes return "Code — Description")
-      const raw = parsed as Record<string, number>;
-      for (const [key, val] of Object.entries(raw)) {
-        const cleanKey = key.split(/\s*[—–]\s/)[0].trim();
-        confidence[cleanKey] = (confidence[cleanKey] ?? 0) + (typeof val === "number" ? val : 0);
+      // New format: { codes: { ... }, reasoning: "..." }
+      if (parsed.codes && typeof parsed.codes === "object" && !Array.isArray(parsed.codes)) {
+        const raw = parsed.codes as Record<string, number>;
+        for (const [key, val] of Object.entries(raw)) {
+          const cleanKey = key.split(/\s*[—–]\s/)[0].trim();
+          if (typeof val === "number") {
+            confidence[cleanKey] = (confidence[cleanKey] ?? 0) + val;
+          }
+        }
+        if (typeof parsed.reasoning === "string") {
+          reasoning = parsed.reasoning;
+        }
+      } else {
+        // Old flat format: { "Code1": 70, "Code2": 30 }
+        const raw = parsed as Record<string, number>;
+        for (const [key, val] of Object.entries(raw)) {
+          const cleanKey = key.split(/\s*[—–]\s/)[0].trim();
+          if (typeof val === "number") {
+            confidence[cleanKey] = (confidence[cleanKey] ?? 0) + val;
+          }
+        }
       }
     }
   } catch {
@@ -316,7 +335,7 @@ function parseAIResponse(output: string, codebookCodes?: string[]): { codes: str
     .filter(([, v]) => v > 0)
     .sort(([, a], [, b]) => b - a)
     .map(([k]) => k);
-  return { codes, confidence };
+  return { codes, confidence, reasoning };
 }
 
 // ─── Build export row arrays ─────────────────────────────────────────────────
@@ -378,11 +397,16 @@ function exportJSON(rows: Record<string, unknown>[], filename: string) {
 // ─── Main Page ───────────────────────────────────────────────────────────────
 export default function AICoderPage() {
   // Data
-  const [data, setData] = useState<Row[]>([]);
-  const [dataName, setDataName] = useState("");
+  const [data, setData] = useSessionState<Row[]>("aicoder_data", []);
+  const [dataName, setDataName] = useSessionState("aicoder_dataName", "");
 
   // Codebook
-  const [codebook, setCodebook] = useState<CodeEntry[]>([]);
+  const emptyCodebook = (): CodeEntry[] => [
+    { id: crypto.randomUUID(), code: "", description: "", highlights: "" },
+    { id: crypto.randomUUID(), code: "", description: "", highlights: "" },
+    { id: crypto.randomUUID(), code: "", description: "", highlights: "" },
+  ];
+  const [codebook, setCodebook] = useSessionState<CodeEntry[]>("aicoder_codebook", emptyCodebook());
 
   // Prompt
   const [systemPrompt, setSystemPrompt] = usePersistedPrompt("handai_prompt_aicoder", DEFAULT_PROMPT);
@@ -390,12 +414,12 @@ export default function AICoderPage() {
   const provider = useActiveModel();
   const systemSettings = useSystemSettings();
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
-  const { selectedCols, setSelectedCols, toggleCol, toggleAll } = useColumnSelection(allColumns, false);
+  const { selectedCols, setSelectedCols, toggleCol, toggleAll } = useColumnSelection("aicoder_selectedCols", allColumns, false);
 
   // ── Coding state (restored) ──────────────────────────────────────────────
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [codingData, setCodingData] = useState<Record<number, string[]>>({});
-  const [aiData, setAiData] = useState<Record<number, AISuggestion>>({});
+  const [currentIndex, setCurrentIndex] = useSessionState("aicoder_currentIndex", 0);
+  const [codingData, setCodingData] = useSessionState<Record<number, string[]>>("aicoder_codingData", {});
+  const [aiData, setAiData] = useSessionState<Record<number, AISuggestion>>("aicoder_aiData", {});
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [settings, setSettings] = useState<AICSettings>(DEFAULT_SETTINGS);
 
@@ -404,9 +428,12 @@ export default function AICoderPage() {
 
   // Sessions
   const [sessions, setSessions] = useState<AICSession[]>([]);
+  const [pendingDeleteSession, setPendingDeleteSession] = useState<string | null>(null);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showSessions, setShowSessions] = useState(false);
   const [showTable, setShowTable] = useState(false);
+  const [showAIReasoning, setShowAIReasoning] = useState(false);
+  const [tablePage, setTablePage] = useState(0);
   const [sessionName, setSessionName] = useState("");
   const [pendingLoad, setPendingLoad] = useState<{ data: Row[]; name: string } | null>(null);
 
@@ -491,11 +518,14 @@ export default function AICoderPage() {
       lines.push(systemPrompt.trim());
     }
     lines.push("- For EVERY code in the codebook, estimate the probability (0-100) that it applies");
-    lines.push('- Return a JSON object mapping each code label to its probability (e.g. {"Code1": 70, "Code2": 20, "Code3": 10})');
-    lines.push("- All probabilities must sum to 100");
+    lines.push('- Return a JSON object with exactly two keys: "codes" and "reasoning"');
+    lines.push('- "codes": an object mapping each code label to its probability (e.g. {"Code1": 70, "Code2": 20, "Code3": 10})');
+    lines.push('- "reasoning": a single sentence explaining the decisive factor behind the top code');
+    lines.push('- Example: {"codes": {"Burnout": 60, "Resilience": 30, "Flexibility": 10}, "reasoning": "The text explicitly describes emotional exhaustion from overwork."}');
+    lines.push("- All probabilities inside \"codes\" must sum to 100");
     lines.push("- Use ONLY the exact code labels from the codebook — do NOT add, invent, or rename any codes");
-    lines.push("- Every key in the JSON must match a codebook label exactly (case-sensitive)");
-    lines.push("- Do not include any explanation");
+    lines.push("- Every key inside \"codes\" must match a codebook label exactly (case-sensitive)");
+    lines.push("- Do NOT put reasoning or any text inside the \"codes\" object — only numeric probabilities");
     lines.push("");
 
     if (selectedCols.length > 0) {
@@ -600,9 +630,9 @@ export default function AICoderPage() {
       });
 
       const output = result.output.trim();
-      const { codes: parsedCodes, confidence } = parseAIResponse(output, codes);
+      const { codes: parsedCodes, confidence, reasoning } = parseAIResponse(output, codes);
 
-      const suggestion: AISuggestion = { codes: parsedCodes, confidence, reasoning: undefined };
+      const suggestion: AISuggestion = { codes: parsedCodes, confidence, reasoning };
       setAiData((prev) => ({ ...prev, [idx]: suggestion }));
     } catch (err) {
       toast.error(`AI error: ${err instanceof Error ? err.message : String(err)}`);
@@ -660,8 +690,8 @@ export default function AICoderPage() {
       const newAiData: Record<number, AISuggestion> = {};
       results.forEach((r, idx) => {
         if (r.status === "success" && r.ai_codes) {
-          const { codes: parsedCodes, confidence } = parseAIResponse(String(r.ai_codes), codes);
-          newAiData[idx] = { codes: parsedCodes, confidence, reasoning: undefined };
+          const { codes: parsedCodes, confidence, reasoning } = parseAIResponse(String(r.ai_codes), codes);
+          newAiData[idx] = { codes: parsedCodes, confidence, reasoning };
         }
       });
       const scrollY = window.scrollY;
@@ -707,7 +737,7 @@ export default function AICoderPage() {
     setData(newData);
     setDataName(name);
     setCurrentIndex(0);
-    setCodebook([]);
+    setCodebook(emptyCodebook());
     setCodingData({});
     setAiData({});
     toast.success(`Loaded ${newData.length} rows from ${name}`);
@@ -874,12 +904,48 @@ export default function AICoderPage() {
           <p className="text-muted-foreground text-sm">AI-assisted qualitative coding with review &amp; analytics</p>
         </div>
         {data.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setCodebook([]); setCodingData({}); setAiData({}); setCurrentIndex(0); batch.clearResults(); }}>
-            Start Over
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("aicoder_"); setData([]); setDataName(""); setCodebook(emptyCodebook()); setCodingData({}); setAiData({}); setCurrentIndex(0); setSystemPrompt(""); setSessionName(""); setAiInstructions(""); batch.clearResults(); }}>
+            <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
         )}
       </div>
 
+      {/* ── Session resume ────────────────────────────────────────────────── */}
+      {sessions.length > 0 && (
+        <Collapsible className="border rounded-xl overflow-hidden mb-4">
+          <CollapsibleTrigger className="flex items-center gap-2 w-full px-4 py-3 text-sm font-medium hover:bg-muted/30 transition-colors">
+            <ChevronRight className="h-3.5 w-3.5 transition-transform [[data-state=open]_&]:rotate-90" />
+            Resume a Session
+            <span className="text-xs text-muted-foreground font-normal ml-auto">{sessions.length} saved</span>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="p-3 pt-0 space-y-2">
+              {sessions.slice(0, 5).map((s) => {
+                const coded = Object.values(s.codingData || {}).filter((c) => c.length > 0).length;
+                return (
+                  <div key={s.name} className="flex items-center justify-between p-2.5 rounded border hover:bg-muted/30">
+                    <div>
+                      <div className="text-sm font-medium">{s.name}</div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {s.data.length} rows · {coded} coded · {new Date(s.savedAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <Button size="sm" variant="outline" onClick={() => loadSession(s)}>Load</Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        onClick={() => setPendingDeleteSession(s.name)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      )}
+
+      <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
@@ -933,7 +999,7 @@ export default function AICoderPage() {
           <div className="flex items-center gap-2">
             <input ref={csvImportRef} type="file" accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden" onChange={importCodebook} />
             <Button variant="outline" size="sm" onClick={() => csvImportRef.current?.click()}>
-              <Upload className="h-3.5 w-3.5 mr-1.5" />Import
+              <Upload className="h-3.5 w-3.5 mr-1.5" />Import CSV
             </Button>
             <Button variant="outline" size="sm" disabled={codebook.length === 0} onClick={exportCodebookCSV}>
               <Upload className="h-3.5 w-3.5 mr-1.5" />Export CSV
@@ -956,38 +1022,32 @@ export default function AICoderPage() {
         </div>
 
         <div className="border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b bg-muted/20">
-                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[20%]">Code</th>
-                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[35%]">Description</th>
-                <th className="text-left px-3 py-2 font-medium text-muted-foreground text-xs w-[30%]">Highlight Keywords</th>
-                <th className="px-2 py-2 w-8" />
-              </tr>
-            </thead>
-            <tbody>
-              {codebook.length === 0 ? (
-                <tr><td colSpan={4} className="text-center py-10 text-xs text-muted-foreground italic">No codes yet — click &ldquo;Add Code&rdquo; below or import a CSV file.</td></tr>
-              ) : (
-                codebook.map((entry) => (
-                  <tr key={entry.id} className="border-b last:border-0 hover:bg-muted/10 transition-colors">
-                    <td className="px-2 py-1.5"><Input value={entry.code} onChange={(e) => updateCode(entry.id, "code", e.target.value)} placeholder="Code label" className="h-7 text-sm font-medium px-2" /></td>
-                    <td className="px-2 py-1.5"><Input value={entry.description} onChange={(e) => updateCode(entry.id, "description", e.target.value)} placeholder="What this code means…" className="h-7 text-sm px-2" /></td>
-                    <td className="px-2 py-1.5"><Input value={entry.highlights} onChange={(e) => updateCode(entry.id, "highlights", e.target.value)} placeholder="word1, word2, phrase…" className="h-7 text-sm px-2" /></td>
-                    <td className="px-2 py-1.5 text-center">
-                      <button onClick={() => deleteCode(entry.id)} className="text-muted-foreground hover:text-destructive transition-colors p-0.5" aria-label="Delete code">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-          <div className="px-3 py-2 border-t bg-muted/5">
-            <button onClick={addCode} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
-              <Plus className="h-3.5 w-3.5" /> Add Code
-            </button>
+          <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Codebook</div>
+          <div className="p-3 space-y-2">
+            {codebook.length === 0 ? (
+              <p className="text-center py-8 text-xs text-muted-foreground italic">No codes yet — click &ldquo;Add Code&rdquo; below or import a CSV file.</p>
+            ) : (
+              codebook.map((entry) => (
+                <div key={entry.id} className="flex gap-2 items-center">
+                  <Input value={entry.code} onChange={(e) => updateCode(entry.id, "code", e.target.value)} placeholder="Code label" className="flex-[2] h-8 text-xs" />
+                  <Input value={entry.description} onChange={(e) => updateCode(entry.id, "description", e.target.value)} placeholder="Description" className="flex-[3] h-8 text-xs" />
+                  <Input value={entry.highlights} onChange={(e) => updateCode(entry.id, "highlights", e.target.value)} placeholder="word1, word2, phrase…" className="flex-[3] h-8 text-xs" />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
+                    onClick={() => deleteCode(entry.id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="px-3 pb-3">
+            <Button variant="outline" size="sm" className="w-full text-xs" onClick={addCode}>
+              <Plus className="h-3 w-3 mr-2" /> Add Code
+            </Button>
           </div>
         </div>
       </div>
@@ -1002,6 +1062,8 @@ export default function AICoderPage() {
       >
         <NoModelWarning activeModel={provider} />
       </AIInstructionsSection>
+
+      </div>
 
       <div className="border-t" />
 
@@ -1038,43 +1100,83 @@ export default function AICoderPage() {
                       size="sm"
                       variant="outline"
                     >
-                      Test (20 rows)
+                      Test ({Math.min(10, data.length)} rows)
                     </Button>
                     <Button
                       onClick={() => batch.run("full")}
                       disabled={!provider || batch.isProcessing}
                       size="sm"
-                      className="bg-orange-500 hover:bg-orange-600 text-white"
+                      className="bg-red-500 hover:bg-red-600 text-white"
                     >
                       Full Batch ({data.length} rows)
                     </Button>
                   </div>
                 )}
               </div>
-              {batch.isProcessing && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="flex items-center gap-1.5">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      Processing {batch.progress.total} rows...
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span>{batch.progress.completed} / {batch.progress.total}{batch.etaStr ? ` — ${batch.etaStr}` : ""}</span>
-                      <Button
-                        size="sm" variant="outline"
-                        className="h-6 px-2 text-[11px] border-red-300 text-red-600"
-                        onClick={batch.abort}
-                      >
-                        Stop
-                      </Button>
+              {(() => {
+                const incompleteCount = batch.failedCount + batch.skippedCount;
+                const isStopped = !batch.isProcessing && incompleteCount > 0;
+                const completedOk = batch.progress.total - incompleteCount;
+                if (batch.isProcessing || isStopped) return (
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-xs text-muted-foreground flex-wrap gap-1">
+                      <span className="flex items-center gap-1.5">
+                        {batch.isProcessing ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            {batch.aborting
+                              ? "Stopping — waiting for in-flight rows..."
+                              : `Processing ${batch.progress.total} rows...`}
+                            {!batch.aborting && batch.etaStr && (
+                              <span className="text-muted-foreground ml-1">{batch.etaStr}</span>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            Stopped — {completedOk} of {batch.progress.total} completed
+                            {batch.failedCount > 0 && (
+                              <span className="text-red-500 ml-1">({batch.failedCount} errors)</span>
+                            )}
+                          </>
+                        )}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        {batch.isProcessing && (
+                          <span>{batch.progress.completed} / {batch.progress.total}</span>
+                        )}
+                        {batch.isProcessing && !batch.aborting && (
+                          <Button variant="outline" size="sm" onClick={batch.abort}
+                            className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                            Stop
+                          </Button>
+                        )}
+                        {isStopped && (
+                          <>
+                            <Button variant="outline" size="sm" onClick={() => batch.resume()}
+                              className="h-6 px-2 text-[11px] border-green-300 text-green-700 hover:bg-green-50">
+                              <Play className="h-3 w-3 mr-1" />
+                              Resume ({incompleteCount} rows)
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={batch.clearResults}
+                              className="h-6 px-2 text-[11px] border-muted-foreground/30 text-muted-foreground hover:bg-muted">
+                              <X className="h-3 w-3 mr-1" />
+                              Cancel
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
+                      <div
+                        className={`${isStopped || batch.aborting ? "bg-amber-400" : "bg-black dark:bg-white"} h-full transition-all duration-300`}
+                        style={{ width: `${isStopped && batch.progress.total > 0 ? Math.round((completedOk / batch.progress.total) * 100) : batch.progressPct}%` }}
+                      />
                     </div>
                   </div>
-                  <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
-                    <div className="bg-orange-500 h-full transition-all duration-300" style={{ width: `${batch.progressPct}%` }} />
-                  </div>
-                </div>
-              )}
-              {!batch.isProcessing && aiCount > 0 && (
+                );
+                return null;
+              })()}
+              {!batch.isProcessing && batch.failedCount === 0 && batch.skippedCount === 0 && aiCount > 0 && (
                 <p className="text-xs text-green-600">
                   AI suggestions ready for {aiCount}/{data.length} rows
                 </p>
@@ -1161,6 +1263,34 @@ export default function AICoderPage() {
               )}
             </div>
 
+            {/* AI result badge + reasoning */}
+            {currentSuggestion && currentSuggestion.codes.length > 0 && (
+              <div className="flex items-start gap-3 px-4 py-3 border rounded-lg">
+                <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                  <span className="text-xs font-medium text-muted-foreground">AI:</span>
+                  {currentSuggestion.codes.map((c) => {
+                    const conf = currentSuggestion.confidence?.[c];
+                    return (
+                      <span key={c} className="text-xs font-medium px-2 py-0.5 rounded"
+                        style={{ backgroundColor: codeColor(c, codes), color: "#1a1a1a" }}>
+                        {c}{conf != null ? ` ${Math.round(conf)}%` : ""}
+                      </span>
+                    );
+                  })}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <button onClick={() => setShowAIReasoning((v) => !v)}
+                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+                    {showAIReasoning ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                    {showAIReasoning ? "Hide" : "Show"} reasoning
+                  </button>
+                  {showAIReasoning && currentSuggestion.reasoning && (
+                    <p className="text-xs text-muted-foreground mt-1 italic">{currentSuggestion.reasoning}</p>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* ── AI action bar ───────────────────────────────────────────── */}
             <div className="flex items-center gap-2 flex-wrap !mt-4">
               {provider ? (
@@ -1169,7 +1299,7 @@ export default function AICoderPage() {
                   size="sm"
                   onClick={() => void getAiSuggestion()}
                   disabled={isAiLoading}
-                  className="border-orange-400 text-orange-600 hover:bg-orange-50"
+                  className="border-red-400 text-red-600 hover:bg-red-50"
                 >
                   {isAiLoading ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : null}
                   {currentSuggestion ? "Refresh AI" : "Ask AI"}
@@ -1188,23 +1318,24 @@ export default function AICoderPage() {
 
             {/* ── Navigation bar (5 elements) ────────────────────────────────── */}
             <div className="grid grid-cols-5 gap-1.5 items-center">
-              <Button variant="outline" size="sm" onClick={() => setCurrentIndex(0)} disabled={currentIndex === 0}>◀◀</Button>
-              <Button variant="outline" size="sm" onClick={() => navigate(-1)} disabled={currentIndex === 0}>◀</Button>
+              <Button variant="destructive" className="gap-2 px-5" onClick={() => setCurrentIndex(0)} disabled={currentIndex === 0}>◀◀</Button>
+              <Button variant="destructive" className="gap-2 px-5" onClick={() => navigate(-1)} disabled={currentIndex === 0}>◀</Button>
               <div className="text-center text-sm font-medium border rounded px-3 py-1.5">
                 {currentIndex + 1} / {totalRows}
               </div>
-              <Button variant="outline" size="sm" onClick={() => navigate(1)} disabled={currentIndex >= totalRows - 1}>▶</Button>
-              <Button variant="outline" size="sm" onClick={() => setCurrentIndex(totalRows - 1)} disabled={currentIndex >= totalRows - 1}>▶▶</Button>
+              <Button variant="destructive" className="gap-2 px-5" onClick={() => navigate(1)} disabled={currentIndex >= totalRows - 1}>▶</Button>
+              <Button variant="destructive" className="gap-2 px-5" onClick={() => setCurrentIndex(totalRows - 1)} disabled={currentIndex >= totalRows - 1}>▶▶</Button>
             </div>
             <div className="text-[10px] text-muted-foreground text-center">
               ← → or h/l navigate &nbsp;·&nbsp; 1–9 toggle codes
             </div>
 
             {/* ── Session bar (below navigation) ────────────────────────────── */}
+            <div className="space-y-1.5">
             <div className="flex items-center gap-3 flex-wrap">
               <div className="text-sm">
                 <span className="font-medium">Session: </span>
-                <code className="text-blue-600 dark:text-blue-400 text-xs bg-blue-50 dark:bg-blue-950/30 px-1.5 py-0.5 rounded">
+                <code className="text-red-600 dark:text-red-400 text-xs bg-red-50 dark:bg-red-950/30 px-1.5 py-0.5 rounded">
                   {sessionName || dataName || "untitled"}
                 </code>
                 <span className="text-muted-foreground ml-2 text-xs">
@@ -1222,6 +1353,11 @@ export default function AICoderPage() {
                   Table
                 </Button>
               </div>
+            </div>
+            {/* Progress bar */}
+            <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+              <div className="bg-red-500 h-full transition-all duration-500" style={{ width: `${totalRows > 0 ? (codedCount / totalRows) * 100 : 0}%` }} />
+            </div>
             </div>
 
             {/* Save dialog */}
@@ -1253,7 +1389,7 @@ export default function AICoderPage() {
                         <div className="flex gap-1.5">
                           <Button size="sm" variant="outline" className="h-7" onClick={() => loadSession(s)}>Load</Button>
                           <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                            onClick={() => { deleteStoredSession(s.name); setSessions(listSessions()); }}>
+                            onClick={() => setPendingDeleteSession(s.name)}>
                             <Trash2 className="h-3 w-3" />
                           </Button>
                         </div>
@@ -1265,69 +1401,72 @@ export default function AICoderPage() {
             )}
 
             {/* Table panel */}
-            {showTable && (
-              <div className="border rounded-xl overflow-hidden">
-                <div className="px-4 py-3 border-b font-medium text-sm flex items-center justify-between">
-                  <span>Records</span>
-                  <span className="text-xs text-muted-foreground font-normal">{totalRows} rows</span>
+            {showTable && (() => {
+              const pageSize = 10;
+              const totalTablePages = Math.ceil(data.length / pageSize);
+              const pageData = data.slice(tablePage * pageSize, (tablePage + 1) * pageSize);
+              const startIdx = tablePage * pageSize;
+              return (
+                <div className="border rounded-xl overflow-hidden">
+                  <div className="px-4 py-3 border-b font-medium text-sm flex items-center justify-between">
+                    <span>Records</span>
+                    <span className="text-xs text-muted-foreground font-normal">{totalRows} rows</span>
+                  </div>
+                  <div className="divide-y">
+                    {pageData.map((row, pi) => {
+                      const i = startIdx + pi;
+                      const rowCodes = codingData[i] ?? [];
+                      const firstCol = Object.values(row).map(String).join(" · ").slice(0, 80);
+                      return (
+                        <button key={i} onClick={() => { setCurrentIndex(i); setShowTable(false); }}
+                          className={cn(
+                            "w-full text-left px-4 py-2.5 hover:bg-muted/30 transition-colors flex items-center gap-3",
+                            i === currentIndex && "bg-muted/50"
+                          )}>
+                          <span className="text-xs text-muted-foreground w-8 shrink-0">{i + 1}</span>
+                          <span className="text-sm flex-1 truncate">{firstCol}</span>
+                          <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end max-w-[50%]">
+                            {aiData[i]?.codes?.slice(0, 1).map((c) => (
+                              <span key={`ai-${c}`} className="text-[10px] px-1.5 py-0.5 rounded border border-orange-300 text-orange-600 dark:border-orange-800 dark:text-orange-400 truncate max-w-[80px]">
+                                {c}
+                              </span>
+                            ))}
+                            {rowCodes.map((c) => (
+                              <span key={`h-${c}`} className="text-[10px] px-1.5 py-0.5 rounded font-medium truncate max-w-[80px]"
+                                style={{ backgroundColor: codeColor(c, codes), color: "#1a1a1a" }}>
+                                {c}
+                              </span>
+                            ))}
+                            {!aiData[i]?.codes?.length && rowCodes.length === 0 && (
+                              <span className="text-[10px] text-muted-foreground">—</span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {totalTablePages > 1 && (
+                    <div className="px-3 py-2 flex items-center justify-between text-xs text-muted-foreground border-t bg-muted/20">
+                      <span>{data.length} rows</span>
+                      <div className="flex items-center gap-2">
+                        <span>
+                          {tablePage * pageSize + 1}&ndash;{Math.min((tablePage + 1) * pageSize, data.length)} of {data.length}
+                        </span>
+                        <Button variant="outline" size="sm" className="h-6 px-2"
+                          onClick={() => setTablePage((p) => Math.max(0, p - 1))} disabled={tablePage === 0}>
+                          <ChevronLeft className="h-3 w-3" />
+                        </Button>
+                        <Button variant="outline" size="sm" className="h-6 px-2"
+                          onClick={() => setTablePage((p) => Math.min(totalTablePages - 1, p + 1))} disabled={tablePage >= totalTablePages - 1}>
+                          <ChevronRight className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <div className="max-h-72 overflow-y-auto divide-y">
-                  {data.map((row, i) => {
-                    const rowCodes = codingData[i] ?? [];
-                    const firstCol = Object.values(row).map(String).join(" · ").slice(0, 80);
-                    return (
-                      <button key={i} onClick={() => { setCurrentIndex(i); setShowTable(false); }}
-                        className={cn(
-                          "w-full text-left px-4 py-2.5 hover:bg-muted/30 transition-colors flex items-center gap-3",
-                          i === currentIndex && "bg-muted/50"
-                        )}>
-                        <span className="text-xs text-muted-foreground w-8 shrink-0">{i + 1}</span>
-                        <span className="text-sm flex-1 truncate">{firstCol}</span>
-                        <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end max-w-[50%]">
-                          {aiData[i]?.codes?.slice(0, 1).map((c) => (
-                            <span key={`ai-${c}`} className="text-[10px] px-1.5 py-0.5 rounded border border-orange-300 text-orange-600 dark:border-orange-800 dark:text-orange-400 truncate max-w-[80px]">
-                              {c}
-                            </span>
-                          ))}
-                          {rowCodes.map((c) => (
-                            <span key={`h-${c}`} className="text-[10px] px-1.5 py-0.5 rounded font-medium truncate max-w-[80px]"
-                              style={{ backgroundColor: codeColor(c, codes), color: "#1a1a1a" }}>
-                              {c}
-                            </span>
-                          ))}
-                          {!aiData[i]?.codes?.length && rowCodes.length === 0 && (
-                            <span className="text-[10px] text-muted-foreground">—</span>
-                          )}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
-            {/* ── Progress + applied codes ──────────────────────────────────── */}
-            <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
-              <span>{codedCount}/{totalRows} coded · {aiCount} AI</span>
-              <div className="flex flex-wrap gap-1.5 justify-end">
-                {appliedCodes.map((code) => (
-                  <span
-                    key={code}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium cursor-pointer hover:opacity-70"
-                    style={{ backgroundColor: codeColor(code, codes) }}
-                    onClick={() => toggleCode(code)}
-                    title="Click to remove"
-                  >
-                    {code} <X className="h-2.5 w-2.5" />
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            {/* Progress bar */}
-            <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-              <div className="bg-orange-400 h-full transition-all duration-500" style={{ width: `${totalRows > 0 ? (codedCount / totalRows) * 100 : 0}%` }} />
-            </div>
           </>
         )}
       </div>
@@ -1339,7 +1478,7 @@ export default function AICoderPage() {
         <h2 className="text-2xl font-bold">6. Export Results</h2>
         <div className="flex items-center gap-3 flex-wrap">
           {/* Analytics */}
-          <Button variant="outline" size="sm" onClick={() => setShowAnalytics((v) => !v)} disabled={codedCount === 0 && aiCount === 0}>
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => setShowAnalytics((v) => !v)} disabled={codedCount === 0 && aiCount === 0}>
             <BarChart2 className="h-3.5 w-3.5 mr-1.5" /> Analytics
           </Button>
 
@@ -1416,6 +1555,28 @@ export default function AICoderPage() {
           />
         )}
       </div>
+
+      {/* ── Delete session confirmation ─────────────────────────────────── */}
+      <Dialog open={!!pendingDeleteSession} onOpenChange={(open) => { if (!open) setPendingDeleteSession(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete session?</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete &ldquo;{pendingDeleteSession}&rdquo;? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingDeleteSession(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={() => {
+              if (pendingDeleteSession) {
+                deleteStoredSession(pendingDeleteSession);
+                setSessions(listSessions());
+                setPendingDeleteSession(null);
+              }
+            }}>Delete</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Pending load dialog ───────────────────────────────────────────── */}
       <Dialog open={!!pendingLoad} onOpenChange={(open) => { if (!open) setPendingLoad(null); }}>

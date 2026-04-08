@@ -83,22 +83,21 @@ export function ExportDropdown({ data, filename }: { data: Record<string, unknow
         <div className="relative">
             <Button
                 variant="outline"
-                size="sm"
-                className="h-8 px-2.5 text-xs gap-1"
+                className="h-9 px-4 text-sm gap-1.5 font-medium"
                 onClick={() => setShowMenu((v) => !v)}
             >
-                <Download className="h-3 w-3" />
+                <Download className="h-4 w-4" />
                 Export
-                <ChevronDown className="h-3 w-3 opacity-50" />
+                <ChevronDown className="h-3.5 w-3.5 opacity-50" />
             </Button>
             {showMenu && (
                 <>
                     <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
-                    <div className="absolute right-0 top-full mt-1 z-50 border rounded-md bg-popover shadow-md py-1 min-w-[100px]">
+                    <div className="absolute right-0 top-full mt-1 z-50 border rounded-md bg-popover shadow-md py-1 min-w-[120px]">
                         {(["csv", "tsv", "json", "xlsx"] as ExportFormat[]).map((fmt) => (
                             <button
                                 key={fmt}
-                                className="w-full text-left px-3 py-1.5 text-xs hover:bg-muted transition-colors"
+                                className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors"
                                 onClick={() => {
                                     exportData(data, fmt, filename);
                                     setShowMenu(false);
@@ -162,7 +161,7 @@ export function DataTable({ data, maxRows = 10 }: DataTableProps) {
                         {headers.map((header) => (
                             <TableHead
                                 key={header}
-                                className="font-bold cursor-pointer hover:bg-muted/80 select-none whitespace-nowrap"
+                                className="font-bold cursor-pointer hover:bg-muted/80 select-none"
                                 onClick={() => handleHeaderClick(header)}
                             >
                                 <div className="flex items-center gap-1">
@@ -183,7 +182,7 @@ export function DataTable({ data, maxRows = 10 }: DataTableProps) {
                             {headers.map((header) => (
                                 <TableCell
                                     key={`${i}-${header}`}
-                                    className="max-w-xs cursor-pointer hover:bg-muted/20"
+                                    className="max-w-[40vw] cursor-pointer hover:bg-muted/20"
                                     onClick={() => setExpanded({ col: header, value: String(row[header] ?? "") })}
                                 >
                                     <div className="line-clamp-2 break-words text-sm">
@@ -197,7 +196,7 @@ export function DataTable({ data, maxRows = 10 }: DataTableProps) {
             </Table>
 
             {totalPages > 1 && (
-                <div className="px-3 py-2 flex items-center justify-between text-xs text-muted-foreground">
+                <div className="px-3 py-2 flex items-center justify-between text-xs text-muted-foreground border-t bg-muted/20">
                     <span>{data.length} rows</span>
                     <div className="flex items-center gap-2">
                         <span>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Bot, Database, Edit3, Users, Wand2, Columns, History, BookOpen, Sparkles, FileArchive, ArrowRight, MoreVertical, Printer, Video, RefreshCw, Settings, Clock } from "lucide-react";
+import { Bot, Database, Edit3, Users, Wand2, Columns, History, BookOpen, Sparkles, FileArchive, TableProperties, ArrowRight, MoreVertical, Printer, Video, RefreshCw, Settings, Clock } from "lucide-react";
 import Link from "next/link";
 import {
   DropdownMenu,
@@ -94,8 +94,17 @@ const CATEGORIES = [
         border: "hover:border-cyan-200 dark:hover:border-cyan-800",
       },
       {
+        title: "Extract Data",
+        description: "Extract structured tabular data from documents using AI.",
+        icon: TableProperties,
+        href: "/extract-data",
+        color: "text-teal-500",
+        bg: "bg-teal-50 dark:bg-teal-950/30",
+        border: "hover:border-teal-200 dark:hover:border-teal-800",
+      },
+      {
         title: "Process Documents",
-        description: "Extract structured data from PDF, DOCX, TXT, and MD files using AI.",
+        description: "Upload documents, write instructions, and get free-form AI output.",
         icon: FileArchive,
         href: "/process-documents",
         color: "text-violet-500",
@@ -177,8 +186,8 @@ export default function HomePage() {
     <div className="space-y-10 pb-16 animate-in fade-in duration-500">
 
       {/* Hero */}
-      <div className="space-y-2 pb-2 flex items-start justify-between">
-        <div className="max-w-3xl">
+      <div className="space-y-2 pb-2 flex items-start justify-between flex-wrap gap-2">
+        <div className="min-w-0 flex-1">
           <h1 className="text-4xl font-bold tracking-tight">Welcome to Handai</h1>
           <p className="text-lg text-muted-foreground">
             Your AI-powered qualitative research and data science suite.

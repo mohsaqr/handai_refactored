@@ -1,24 +1,16 @@
 "use client";
 
-import React, { useState, useCallback, useRef, useEffect } from "react";
-import pLimit from "p-limit";
-import { useProcessingFlag } from "@/hooks/useProcessingFlag";
+import React, { useState, useCallback, useRef, useMemo } from "react";
 import { useDropzone } from "react-dropzone";
-import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { PromptEditor } from "@/components/tools/PromptEditor";
-import { Input } from "@/components/ui/input";
 import { useActiveModel, useSystemSettings } from "@/lib/hooks";
 import { NoModelWarning } from "@/components/tools/NoModelWarning";
 import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
+import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
+import { useBatchProcessor } from "@/hooks/useBatchProcessor";
+import { ExecutionPanel } from "@/components/tools/ExecutionPanel";
 import Link from "next/link";
 import {
   FileText,
@@ -28,88 +20,37 @@ import {
   CheckCircle2,
   AlertCircle,
   ExternalLink,
-  Plus,
-  Sparkles,
   Trash2,
+  RotateCcw,
+  Copy,
   Check,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { Row } from "@/types";
-import type { FieldDef, FileState } from "@/types";
-import { dispatchDocumentExtract, dispatchDocumentAnalyze, dispatchCreateRun, dispatchSaveResults } from "@/lib/llm-dispatch";
-import { getPrompt, formatExtractionSchema } from "@/lib/prompts";
+import type { FileState } from "@/types";
+import { dispatchDocumentProcess } from "@/lib/llm-dispatch";
+import { downloadCSV, downloadXLSX, downloadText, downloadMarkdown } from "@/lib/export";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const FIELD_TYPES: FieldDef["type"][] = ["text", "number", "date", "boolean", "list"];
+type Row = Record<string, unknown>;
 
-interface SuggestedField {
-  name: string;
-  type: "text" | "number" | "date" | "boolean" | "list";
-  description: string;
-  checked: boolean;
-}
+const OUTPUT_FORMATS = [
+  { value: "csv", label: "CSV" },
+  { value: "xlsx", label: "Excel (.xlsx)" },
+  { value: "json", label: "JSON" },
+  { value: "txt", label: "Text (.txt)" },
+  { value: "md", label: "Markdown (.md)" },
+] as const;
 
-const TEMPLATES: Record<string, { label: string; desc: string; fields: FieldDef[] }> = {
-  custom: { label: "Custom", desc: "Define your own extraction schema", fields: [] },
-  key_points: {
-    label: "Key Points", desc: "Main claims, supporting evidence, and relevance",
-    fields: [
-      { name: "key_point", type: "text", description: "Main claim or finding" },
-      { name: "supporting_evidence", type: "text", description: "Evidence supporting the claim" },
-      { name: "relevance", type: "text", description: "Why this point is relevant" },
-    ],
-  },
-  meeting_minutes: {
-    label: "Meeting Minutes", desc: "Action items, decisions, owners, and dates",
-    fields: [
-      { name: "date", type: "date", description: "Meeting date" },
-      { name: "agenda_item", type: "text", description: "Agenda item discussed" },
-      { name: "decision_or_action", type: "text", description: "Decision made or action required" },
-      { name: "owner", type: "text", description: "Person responsible" },
-      { name: "due_date", type: "date", description: "Action item due date" },
-    ],
-  },
-  research_summary: {
-    label: "Research Summary", desc: "Research question, methodology, findings, conclusions",
-    fields: [
-      { name: "research_question", type: "text", description: "Main research question" },
-      { name: "methodology", type: "text", description: "Research methodology used" },
-      { name: "key_finding", type: "text", description: "Key finding or result" },
-      { name: "conclusion", type: "text", description: "Main conclusion" },
-      { name: "limitation", type: "text", description: "Study limitation" },
-    ],
-  },
-  invoice: {
-    label: "Invoice", desc: "Line items, prices, vendor, and totals",
-    fields: [
-      { name: "invoice_number", type: "text", description: "Invoice identifier" },
-      { name: "date", type: "date", description: "Invoice date" },
-      { name: "vendor", type: "text", description: "Vendor or supplier name" },
-      { name: "item_description", type: "text", description: "Line item description" },
-      { name: "quantity", type: "number", description: "Item quantity" },
-      { name: "unit_price", type: "number", description: "Price per unit" },
-      { name: "total", type: "number", description: "Line item total" },
-    ],
-  },
-  contract: {
-    label: "Contract", desc: "Parties, obligations, payment terms, key clauses",
-    fields: [
-      { name: "party", type: "text", description: "Party or organization name" },
-      { name: "obligation", type: "text", description: "Key obligation or requirement" },
-      { name: "payment_terms", type: "text", description: "Payment terms and conditions" },
-      { name: "termination_conditions", type: "text", description: "Termination conditions" },
-      { name: "key_clause", type: "text", description: "Important contract clause" },
-    ],
-  },
-};
+type OutputFormat = (typeof OUTPUT_FORMATS)[number]["value"];
 
-const SAMPLE_EXTRACTION_PROMPTS: Record<string, string> = {
-  "Invoice details": "Extract invoice details: invoice number, date, vendor name, line items with quantities and prices, and total amount.",
-  "Meeting minutes": "Extract meeting minutes: date, attendees, agenda items, decisions made, action items with owners and due dates.",
-  "Research findings": "Extract research findings: research question, methodology, key results, conclusions, and limitations.",
-  "Contract key terms": "Extract contract key terms: parties involved, obligations, payment terms, termination conditions, and important clauses.",
-  "Resume / CV data": "Extract candidate information: name, contact details, education history, work experience, and skills.",
+const SAMPLE_PROMPTS: Record<string, string> = {
+  "Summarize in 3 bullet points": "Summarize this document in 3 bullet points",
+  "Translate to French": "Translate this document to French",
+  "Extract key findings": "Extract the key findings and recommendations",
+  "List entities": "List all people, organizations, and dates mentioned",
+  "Main argument": "Answer: What is the main argument of this paper?",
+  "Create outline": "Create a structured outline of this document",
 };
 
 function getFileTypeKey(file: File): string | null {
@@ -118,10 +59,15 @@ function getFileTypeKey(file: File): string | null {
     txt_md: [".txt", ".md"], pdf: [".pdf"], docx: [".docx"],
     excel: [".xlsx", ".xls"], json_csv: [".json", ".csv"], html: [".html", ".htm"],
   };
-  for (const [key, extList] of Object.entries(exts)) {
-    if (extList.some((ext) => name.endsWith(ext))) return key;
+  for (const [, extList] of Object.entries(exts)) {
+    if (extList.some((ext) => name.endsWith(ext))) return "supported";
   }
   return null;
+}
+
+interface DocResult {
+  document_name: string;
+  output: string;
 }
 
 // ─── Main page ────────────────────────────────────────────────────────────────
@@ -129,284 +75,200 @@ function getFileTypeKey(file: File): string | null {
 export default function ProcessDocumentsPage() {
   const activeModel = useActiveModel();
   const systemSettings = useSystemSettings();
-  const { markProcessing, markIdle } = useProcessingFlag("/process-documents");
 
   // ── Section 1: Documents
-  const [fileStates, setFileStates] = useState<FileState[]>([]);
+  const [fileStates, setFileStates] = useSessionState<FileState[]>("procdocs2_fileStates", []);
+  const filesRef = useRef<Map<string, File>>(new Map());
+  const fileKey = (f: File) => `${f.name}__${f.size}`;
 
-  // ── Section 2: Describe Data
-  const [customPrompt, setCustomPrompt] = useState("");
+  // ── Section 2: Output Format
+  const [outputFormat, setOutputFormat] = useSessionState<OutputFormat>("procdocs2_outputFormat", "txt");
 
-  // ── Section 3: Define Columns
-  const [fields, setFields] = useState<FieldDef[]>([]);
-  const [suggestedFields, setSuggestedFields] = useState<SuggestedField[]>([]);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [columnMode, setColumnMode] = useState<"ai" | "manual">("ai");
-  const [hasSuggestedOnce, setHasSuggestedOnce] = useState(false);
+  // ── Section 3: Instructions
+  const [customPrompt, setCustomPrompt] = useSessionState("procdocs2_customPrompt", "");
 
-  // ── Suggested fields helpers ──
-  const updateSuggestion = useCallback((idx: number, updates: Partial<SuggestedField>) => {
-    setSuggestedFields((prev) => prev.map((f, i) => (i === idx ? { ...f, ...updates } : f)));
-  }, []);
-
-  const removeSuggestion = useCallback((idx: number) => {
-    setSuggestedFields((prev) => prev.filter((_, i) => i !== idx));
-  }, []);
-
-  const addSuggestion = useCallback(() => {
-    setSuggestedFields((prev) => [...prev, { name: "", type: "text", description: "", checked: true }]);
-  }, []);
-
-  // ── Sync suggested fields → fields ──
-  useEffect(() => {
-    const checked = suggestedFields.filter((f) => f.checked && f.name.trim());
-    if (checked.length > 0) {
-      setFields(checked.map((f) => ({ name: f.name, type: f.type, description: f.description })));
-    }
-  }, [suggestedFields]);
-
-  const checkedCount = suggestedFields.filter((f) => f.checked).length;
-  const hasSuggestions = suggestedFields.length > 0;
-
-  // ── Auto-generate AI Instructions ──────────────────────────────────────────
+  // ── Auto-generate AI Instructions
   const buildAutoInstructions = useCallback(() => {
     const lines: string[] = [];
-    lines.push("You are a document data extractor. Extract structured information from documents.");
+    lines.push("You are a document processing assistant. Process the document according to the user's instructions.");
     lines.push("");
 
     if (customPrompt.trim()) {
-      lines.push("EXTRACTION DESCRIPTION:");
+      lines.push("USER INSTRUCTIONS:");
       lines.push(customPrompt.trim());
       lines.push("");
     }
 
-    const namedFields = fields.filter((f) => f.name.trim());
-    if (namedFields.length > 0) {
-      lines.push("FIELDS TO EXTRACT:");
-      namedFields.forEach((f) => {
-        lines.push(`- ${f.name} (${f.type})${f.description ? `: ${f.description}` : ""}`);
-      });
-      lines.push("");
-    }
-
     lines.push("RULES:");
-    lines.push("- Extract data from the document content");
-    lines.push("- Return a JSON object with the defined field names as keys");
-    lines.push("- If a field cannot be found, return null for that field");
-    lines.push("- Do not include markdown or code fences");
+    lines.push("- Follow the instructions precisely");
+    lines.push("- Base your response only on the document content provided");
+    lines.push("- Return only the requested output — no preamble or commentary");
     lines.push("");
     lines.push(AI_INSTRUCTIONS_MARKER);
 
     return lines.join("\n");
-  }, [customPrompt, fields]);
+  }, [customPrompt]);
 
   // ── Section 4: AI Instructions
   const [aiInstructions, setAiInstructions] = useAIInstructions(buildAutoInstructions);
 
-  // ── Processing
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState({ completed: 0, total: 0 });
-  const [allResults, setAllResults] = useState<Row[]>([]);
-  const [runId, setRunId] = useState<string | null>(null);
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-  const abortRef = useRef(false);
+  // ── System prompt ──────────────────────────────────────────────────────────
+  const buildSystemPrompt = (): string => {
+    if (aiInstructions.trim()) return aiInstructions;
+    if (customPrompt.trim()) return `You are a document processing assistant.\n\nINSTRUCTIONS:\n${customPrompt.trim()}\n\nReturn only the requested output. No preamble or commentary.`;
+    return "You are a document processing assistant. Process the document according to the user's instructions. Return your response as plain text.";
+  };
 
-  type RunMode = "preview" | "test" | "full";
-
-  // ── File drop (accept all types) ──────────────────────────────────────────
+  // ── File drop ──────────────────────────────────────────────────────────────
   const onDrop = useCallback(
     (accepted: File[]) => {
       const valid = accepted.filter((f) => getFileTypeKey(f) !== null);
       const skipped = accepted.length - valid.length;
       if (skipped > 0) toast.warning(`${skipped} file(s) skipped — unsupported type`);
+      valid.forEach((f) => filesRef.current.set(fileKey(f), f));
       setFileStates((prev) => [
         ...prev,
         ...valid.map((f): FileState => ({ file: f, status: "pending" })),
       ]);
     },
-    []
+    [setFileStates]
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop, multiple: true,
   });
 
-  const removeFile = (idx: number) =>
+  const removeFile = (idx: number) => {
+    const fs = fileStates[idx];
+    if (fs) filesRef.current.delete(fileKey(fs.file));
     setFileStates((prev) => prev.filter((_, i) => i !== idx));
-
-  // ── Template ───────────────────────────────────────────────────────────────
-  const applyTemplate = (key: string) => {
-    const t = TEMPLATES[key];
-    if (t?.fields.length > 0) setFields(t.fields);
   };
 
-  // ── AI Suggest ─────────────────────────────────────────────────────────────
-  const analyzeSample = async () => {
-    if (fileStates.length === 0) return toast.error("Upload at least one file first");
-    if (!activeModel) return toast.error("No model configured. Add an API key in Settings.");
-
-    setAnalyzing(true);
-    try {
-      const sampleFile = fileStates[0].file;
-      const result = await dispatchDocumentAnalyze({
-        file: sampleFile,
-        provider: activeModel.providerId,
-        model: activeModel.defaultModel,
-        apiKey: activeModel.apiKey || "",
-        baseUrl: activeModel.baseUrl,
-        hint: customPrompt.trim() || undefined,
-      });
-
-      if (result.fields?.length > 0) {
-        const validTypes = new Set(FIELD_TYPES);
-        const mapped: SuggestedField[] = result.fields.map((f: FieldDef) => ({
-          name: f.name || "",
-          type: validTypes.has(f.type) ? f.type : "text",
-          description: f.description || "",
-          checked: true,
-        }));
-        setSuggestedFields(mapped);
-        setHasSuggestedOnce(true);
-        toast.success(`${mapped.length} fields suggested`);
-      } else {
-        toast.info("No suggestions returned. Try with a more structured document.");
-      }
-    } catch (err: unknown) {
-      toast.error("Analysis failed", { description: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setAnalyzing(false);
-    }
-  };
-
-  // ── Column management ──────────────────────────────────────────────────────
-  const addColumn = () => setFields((prev) => [...prev, { name: "", type: "text", description: "" }]);
-  const removeColumn = (idx: number) => setFields((prev) => prev.filter((_, i) => i !== idx));
-  const updateColumn = (idx: number, updates: Partial<FieldDef>) =>
-    setFields((prev) => prev.map((f, i) => (i === idx ? { ...f, ...updates } : f)));
-
-  // ── System prompt ──────────────────────────────────────────────────────────
-  const buildSystemPrompt = (): string => {
-    // Use AI Instructions if available
-    if (aiInstructions.trim()) return aiInstructions;
-    if (fields.length > 0) {
-      return getPrompt("document.extraction").replace("{schema}", formatExtractionSchema(fields));
-    }
-    return (
-      customPrompt.trim() ||
-      getPrompt("document.extraction").replace(
-        "{schema}",
-        "(no schema defined — extract all logical records with appropriate column names)"
-      )
-    );
-  };
-
-  // ── File state updater ─────────────────────────────────────────────────────
-  const updateFileState = useCallback(
-    (idx: number, updates: Partial<Omit<FileState, "file">>) => {
-      setFileStates((prev) => prev.map((fs, i) => (i === idx ? { ...fs, ...updates } : fs)));
-    },
-    []
+  // ── Build data rows from files ─────────────────────────────────────────────
+  const data: Row[] = useMemo(() =>
+    fileStates.map((fs, i) => ({
+      _fileIdx: i,
+      document_name: fs.file.name,
+      _fileKey: fileKey(fs.file),
+    })),
+    [fileStates]
   );
 
-  // ── Process ────────────────────────────────────────────────────────────────
-  const canProcess = fileStates.length > 0;
+  // ── Batch processor ───────────────────────────────────────────────────────
+  const batch = useBatchProcessor({
+    toolId: "/process-documents",
+    runType: "process-documents",
+    activeModel,
+    systemSettings,
+    data,
+    dataName: fileStates.map((f) => f.file.name).join(", ") || "unnamed",
+    systemPrompt: aiInstructions || buildSystemPrompt(),
+    validate: () => {
+      if (fileStates.length === 0) return "Upload at least one file";
+      if (!customPrompt.trim()) return "Enter processing instructions first";
+      return null;
+    },
+    selectData: (_data: Row[], mode) => {
+      return mode === "test" ? _data.slice(0, 1) : _data;
+    },
+    processRow: async (row: Row) => {
+      const fKey = row._fileKey as string;
+      const file = filesRef.current.get(fKey);
+      if (!file) throw new Error(`File not found: ${row.document_name}`);
 
-  const processFiles = async (mode: RunMode) => {
-    if (fileStates.length === 0) return toast.error("No files uploaded");
-    if (!activeModel) return toast.error("No model configured. Add an API key in Settings.");
+      const systemPrompt = buildSystemPrompt();
 
-    const targets = (mode === "full" ? fileStates : fileStates.slice(0, 1)).map((fs, i) => ({ fs, idx: i }));
-    const systemPrompt = buildSystemPrompt();
+      const t0 = Date.now();
+      const result = await dispatchDocumentProcess({
+        file,
+        provider: activeModel!.providerId,
+        model: activeModel!.defaultModel,
+        apiKey: activeModel!.apiKey || "",
+        baseUrl: activeModel!.baseUrl,
+        systemPrompt,
+      });
 
-    abortRef.current = false;
-    setRunId(null);
-    setIsProcessing(true);
-    markProcessing();
-    setProgress({ completed: 0, total: targets.length });
-    setFileStates((prev) =>
-      prev.map((fs, i) =>
-        i < targets.length ? { ...fs, status: "pending" as const, error: undefined, records: undefined } : fs
-      )
-    );
+      const latency = Date.now() - t0;
+      return {
+        document_name: file.name,
+        output: result.text,
+        status: "success",
+        latency_ms: latency,
+      };
+    },
+    buildResultEntry: (r: Row, i: number) => ({
+      rowIndex: i,
+      input: { document_name: r.document_name } as Record<string, unknown>,
+      output: (r.output as string) ?? "",
+      status: (r.status as string) ?? "success",
+      latency: r.latency_ms as number | undefined,
+      errorMessage: r.error_msg as string | undefined,
+    }),
+    onComplete: () => {},
+  });
 
-    const localRunId = await dispatchCreateRun({
-      runType: "process-documents",
-      provider: activeModel.providerId,
-      model: activeModel.defaultModel,
-      temperature: systemSettings.temperature,
-      systemPrompt,
-      inputFile: fileStates.map((f) => f.file.name).join(", ") || "unnamed",
-      inputRows: targets.length,
+  // ── Derive file statuses from batch results ───────────────────────────────
+  const fileStatuses = useMemo(() => {
+    if (!batch.results.length) return fileStates.map((fs) => fs.status);
+    return fileStates.map((_, i) => {
+      const r = batch.results[i];
+      if (!r) return "pending" as const;
+      if (r.status === "error") return "error" as const;
+      if (r.status === "skipped") return "pending" as const;
+      if (r.status === "success") return "done" as const;
+      return "pending" as const;
     });
+  }, [batch.results, fileStates]);
 
-    const resultsByIndex = new Map<number, Row[]>();
-    const limit = pLimit(systemSettings.maxConcurrency);
-
-    const tasks = targets.map(({ fs: entry, idx }) =>
-      limit(async () => {
-        if (abortRef.current) return;
-        updateFileState(idx, { status: "extracting" });
-
-        try {
-          updateFileState(idx, { status: "analyzing" });
-          const data = await dispatchDocumentExtract({
-            file: entry.file,
-            provider: activeModel.providerId,
-            model: activeModel.defaultModel,
-            apiKey: activeModel.apiKey || "",
-            baseUrl: activeModel.baseUrl,
-            systemPrompt,
-            fields: fields.length > 0 ? fields : undefined,
-          });
-
-          const records = ((data.records ?? []) as Row[]).map((r) => ({
-            document_name: entry.file.name,
-            ...r,
-          }));
-
-          resultsByIndex.set(idx, records);
-          updateFileState(idx, {
-            status: "done",
-            records: data.records,
-            truncated: data.truncated,
-            charCount: data.charCount,
-          });
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          updateFileState(idx, { status: "error", error: msg });
-          toast.error(`Failed: ${entry.file.name}`, { description: msg });
-        }
-
-        setProgress((prev) => ({ ...prev, completed: prev.completed + 1 }));
-      })
-    );
-
-    await Promise.allSettled(tasks);
-
-    const accumulated: Row[] = [];
-    for (let i = 0; i < targets.length; i++) {
-      const records = resultsByIndex.get(i);
-      if (records) accumulated.push(...records);
-    }
-
-    setAllResults(accumulated);
-
-    if (localRunId && accumulated.length > 0) {
-      const resultRows = accumulated.map((r, i) => ({
-        rowIndex: i,
-        input: r as Record<string, unknown>,
-        output: JSON.stringify(r),
-        status: "success" as const,
+  // ── Build results for display ─────────────────────────────────────────────
+  const allResults: DocResult[] = useMemo(() => {
+    return batch.results
+      .filter((r) => r.status === "success" && r.output)
+      .map((r) => ({
+        document_name: r.document_name as string,
+        output: r.output as string,
       }));
-      await dispatchSaveResults(localRunId, resultRows);
-    }
+  }, [batch.results]);
 
-    setRunId(localRunId);
-    setIsProcessing(false);
-    markIdle();
-    if (accumulated.length > 0) {
-      toast.success(`Extracted ${accumulated.length} records from ${targets.length} file(s)`);
+  // ── Export ──────────────────────────────────────────────────────────────────
+  const handleExport = () => {
+    if (allResults.length === 0) return;
+    const fname = "processed_documents";
+
+    switch (outputFormat) {
+      case "csv":
+        void downloadCSV(allResults.map((r) => ({ document_name: r.document_name, output: r.output })), `${fname}.csv`);
+        break;
+      case "xlsx":
+        void downloadXLSX(allResults.map((r) => ({ document_name: r.document_name, output: r.output })), `${fname}.xlsx`);
+        break;
+      case "json": {
+        const blob = new Blob([JSON.stringify(allResults, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${fname}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        break;
+      }
+      case "txt":
+        downloadText(allResults, fname);
+        break;
+      case "md":
+        downloadMarkdown(allResults, fname);
+        break;
     }
+  };
+
+  // ── Copy to clipboard ─────────────────────────────────────────────────────
+  const copyToClipboard = (text: string, idx: number) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedIdx(idx);
+      setTimeout(() => setCopiedIdx(null), 2000);
+    });
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -418,21 +280,21 @@ export default function ProcessDocumentsPage() {
         <div className="space-y-1 max-w-3xl">
           <h1 className="text-4xl font-bold">Process Documents</h1>
           <p className="text-muted-foreground text-sm">
-            Extract structured tabular data from PDF, DOCX, or text documents using AI
+            Upload documents, write instructions, and get free-form AI output
           </p>
         </div>
         {fileStates.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setFileStates([]); setAllResults([]); setRunId(null); }}>
-            Start Over
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("procdocs2_"); batch.clearResults(); filesRef.current.clear(); setFileStates([]); setCustomPrompt(""); setOutputFormat("txt"); setAiInstructions(""); }}>
+            <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
         )}
       </div>
 
+      <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Documents ─────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Documents</h2>
 
-        {/* Drop zone */}
         <div
           {...getRootProps()}
           className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
@@ -444,283 +306,106 @@ export default function ProcessDocumentsPage() {
           <input {...getInputProps()} />
           <Upload className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">
-            {isDragActive ? "Drop files here…" : "Drop files here or click to browse"}
+            {isDragActive ? "Drop files here..." : "Drop files here or click to browse"}
           </p>
           <p className="text-xs text-muted-foreground/60 mt-1">
             PDF, DOCX, Excel, TXT, MD, JSON, CSV, HTML
           </p>
         </div>
 
-        {/* File list */}
         {fileStates.length > 0 && (
           <div className="space-y-1.5">
             <div className="flex items-center justify-between px-1">
               <span className="text-xs text-muted-foreground">{fileStates.length} file{fileStates.length !== 1 ? "s" : ""}</span>
-              <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground" onClick={() => { setFileStates([]); setAllResults([]); toast.success("Cleared all files"); }}>
+              <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground" onClick={() => { filesRef.current.clear(); setFileStates([]); batch.clearResults(); toast.success("Cleared all files"); }}>
                 <Trash2 className="h-3 w-3 mr-1" /> Clear All
               </Button>
             </div>
-            {fileStates.map((entry, idx) => (
-              <div key={idx} className="space-y-1">
-                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg border bg-muted/20">
-                  <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <span className="flex-1 truncate text-xs">{entry.file.name}</span>
-                  <span className="text-[10px] text-muted-foreground shrink-0">
-                    {(entry.file.size / 1024).toFixed(0)} KB
-                  </span>
+            {fileStates.map((entry, idx) => {
+              const status = batch.isProcessing || batch.results.length > 0 ? fileStatuses[idx] : entry.status;
+              const resultRow = batch.results[idx];
+              const errorMsg = resultRow?.error_msg as string | undefined;
+              return (
+                <div key={idx} className="space-y-1">
+                  <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg border bg-muted/20">
+                    <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <span className="flex-1 truncate text-xs">{entry.file.name}</span>
+                    <span className="text-[10px] text-muted-foreground shrink-0">
+                      {(entry.file.size / 1024).toFixed(0)} KB
+                    </span>
 
-                  {entry.status === "pending" && (
-                    <span className="text-[10px] text-muted-foreground shrink-0">Pending</span>
-                  )}
-                  {entry.status === "extracting" && (
-                    <span className="flex items-center gap-1 text-[10px] text-blue-600 shrink-0">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Extracting
-                    </span>
-                  )}
-                  {entry.status === "analyzing" && (
-                    <span className="flex items-center gap-1 text-[10px] text-purple-600 shrink-0">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Analyzing
-                    </span>
-                  )}
-                  {entry.status === "done" && (
-                    <span className="flex items-center gap-1 text-[10px] text-green-600 shrink-0">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      {entry.records?.length ?? 0} records
-                    </span>
-                  )}
-                  {entry.status === "error" && (
-                    <span className="flex items-center gap-1 text-[10px] text-red-500 shrink-0" title={entry.error}>
-                      <AlertCircle className="h-3.5 w-3.5" /> Error
-                    </span>
-                  )}
+                    {status === "pending" && (
+                      <span className="text-[10px] text-muted-foreground shrink-0">Pending</span>
+                    )}
+                    {(status === "extracting" || status === "analyzing") && (
+                      <span className="flex items-center gap-1 text-[10px] text-purple-600 shrink-0">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Processing
+                      </span>
+                    )}
+                    {status === "done" && (
+                      <span className="flex items-center gap-1 text-[10px] text-green-600 shrink-0">
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Done
+                      </span>
+                    )}
+                    {status === "error" && (
+                      <span className="flex items-center gap-1 text-[10px] text-red-500 shrink-0" title={errorMsg}>
+                        <AlertCircle className="h-3.5 w-3.5" /> Error
+                      </span>
+                    )}
 
-                  <button onClick={() => removeFile(idx)} className="text-muted-foreground hover:text-destructive shrink-0">
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-
-                {entry.truncated && entry.charCount !== undefined && (
-                  <div className="ml-3 text-[10px] text-amber-600 flex items-center gap-1">
-                    <AlertCircle className="h-3 w-3" />
-                    Text truncated at 50K chars (full doc: {entry.charCount.toLocaleString()} chars)
+                    <button onClick={() => removeFile(idx)} className="text-muted-foreground hover:text-destructive shrink-0">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
                   </div>
-                )}
-                {entry.status === "error" && entry.error && (
-                  <div className="ml-3 text-[10px] text-red-500 leading-snug">{entry.error}</div>
-                )}
-              </div>
-            ))}
+
+                  {status === "error" && errorMsg && (
+                    <div className="ml-3 text-[10px] text-red-500 leading-snug">{errorMsg}</div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
       <div className="border-t" />
 
-      {/* ── 2. Extraction Prompt ─────────────────────────────────────────── */}
+      {/* ── 2. Output Format ──────────────────────────────────────────── */}
       <div className="space-y-3 py-8">
-        <h2 className="text-2xl font-bold">2. Extraction Prompt</h2>
+        <h2 className="text-2xl font-bold">2. Output Format</h2>
+        <p className="text-sm text-muted-foreground -mt-1">
+          Choose the export format for your processed results.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {OUTPUT_FORMATS.map((fmt) => (
+            <button
+              key={fmt.value}
+              onClick={() => setOutputFormat(fmt.value)}
+              className={`px-4 py-2 rounded-lg border text-sm transition-colors ${
+                outputFormat === fmt.value
+                  ? "border-primary bg-primary/10 text-primary font-medium"
+                  : "border-border hover:border-primary/50 hover:bg-muted/30 text-muted-foreground"
+              }`}
+            >
+              {fmt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="border-t" />
+
+      {/* ── 3. Instructions ───────────────────────────────────────────── */}
+      <div className="space-y-3 py-8">
+        <h2 className="text-2xl font-bold">3. Instructions</h2>
         <PromptEditor
           value={customPrompt}
           onChange={setCustomPrompt}
-          placeholder="Describe what you want to extract from the documents. E.g.: Extract invoice details including amounts, dates, and vendor names..."
-          examplePrompts={SAMPLE_EXTRACTION_PROMPTS}
-          label="Instructions"
-          helpText="Describe the data you want to extract. This feeds into the AI instructions and helps the AI suggest columns."
+          placeholder="What should the AI do with your documents? E.g.: Summarize this document in 3 bullet points..."
+          examplePrompts={SAMPLE_PROMPTS}
+          label="Processing Instructions"
+          helpText="Describe how you want each document processed. This applies to every uploaded file."
         />
-      </div>
-
-      <div className="border-t" />
-
-      {/* ── 3. Define Columns ──────────────────────────────────────────── */}
-      <div className="space-y-4 py-8">
-        <h2 className="text-2xl font-bold">3. Define Columns</h2>
-        <p className="text-sm text-muted-foreground -mt-2">
-          Define the output columns using AI suggestions, manual entry, or a template.
-        </p>
-
-        {/* Mode toggle + Template */}
-        <div className="flex gap-2 items-center flex-wrap">
-          <Button
-            variant={columnMode === "ai" ? "default" : "outline"}
-            size="sm"
-            className="text-xs"
-            onClick={() => { setColumnMode("ai"); if (!hasSuggestedOnce && fileStates.length > 0) void analyzeSample(); }}
-          >
-            <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-            AI Mode
-          </Button>
-          <Button
-            variant={columnMode === "manual" ? "default" : "outline"}
-            size="sm"
-            className="text-xs"
-            onClick={() => setColumnMode("manual")}
-          >
-            <Plus className="h-3.5 w-3.5 mr-1.5" />
-            Manual Mode
-          </Button>
-          <Select onValueChange={applyTemplate}>
-            <SelectTrigger className="w-[180px] h-8 text-xs">
-              <SelectValue placeholder="-- Template..." />
-            </SelectTrigger>
-            <SelectContent>
-              {Object.entries(TEMPLATES).filter(([k]) => k !== "custom").map(([key, t]) => (
-                <SelectItem key={key} value={key} className="text-xs">{t.label}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        {columnMode === "ai" && hasSuggestedOnce && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-xs"
-            onClick={() => void analyzeSample()}
-            disabled={analyzing}
-          >
-            {analyzing ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />}
-            Refresh AI
-          </Button>
-        )}
-
-        {/* AI mode content */}
-        {columnMode === "ai" && (
-          <>
-            {/* AI analyzing indicator */}
-            {analyzing && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Analyzing document for field suggestions...
-              </div>
-            )}
-
-            {/* Suggested fields checklist */}
-            {hasSuggestions && (
-              <div className="border rounded-lg overflow-hidden">
-                <div className="px-4 py-2.5 border-b bg-muted/20 flex items-center justify-between">
-                  <span className="text-sm font-medium">Suggested Fields</span>
-                  <span className="text-xs text-muted-foreground">
-                    {checkedCount} of {suggestedFields.length} selected
-                  </span>
-                </div>
-                <div className="p-3 space-y-1.5">
-                  {suggestedFields.map((field, idx) => (
-                    <div key={idx} className="flex gap-2 items-center">
-                      <input
-                        type="checkbox"
-                        checked={field.checked}
-                        onChange={(e) => updateSuggestion(idx, { checked: e.target.checked })}
-                        className="h-4 w-4 accent-primary shrink-0"
-                      />
-                      <Input
-                        placeholder="field_name"
-                        value={field.name}
-                        onChange={(e) => updateSuggestion(idx, { name: e.target.value })}
-                        className="flex-1 h-8 text-xs"
-                      />
-                      <Select
-                        value={field.type}
-                        onValueChange={(v) => updateSuggestion(idx, { type: v as SuggestedField["type"] })}
-                      >
-                        <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {FIELD_TYPES.map((t) => (
-                            <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <Input
-                        placeholder="Description"
-                        value={field.description}
-                        onChange={(e) => updateSuggestion(idx, { description: e.target.value })}
-                        className="flex-1 h-8 text-xs text-muted-foreground"
-                      />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
-                        onClick={() => removeSuggestion(idx)}
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-                <div className="px-3 pb-3 flex items-center gap-2">
-                  <Button variant="outline" size="sm" className="text-xs" onClick={addSuggestion}>
-                    <Plus className="h-3 w-3 mr-1.5" /> Add Field
-                  </Button>
-                  <div className="flex-1" />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs"
-                    onClick={() => setSuggestedFields((prev) => prev.map((f) => ({ ...f, checked: true })))}
-                  >
-                    <Check className="h-3 w-3 mr-1" /> Select All
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs"
-                    onClick={() => setSuggestedFields([])}
-                  >
-                    Clear
-                  </Button>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* Manual mode content */}
-        {columnMode === "manual" && (
-          <div className="space-y-3">
-            <div className="border rounded-lg overflow-hidden">
-              <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Column Schema</div>
-              <div className="p-3 space-y-2">
-                {fields.map((field, idx) => (
-                  <div key={idx} className="flex gap-2 items-center">
-                    <Input
-                      placeholder="column_name"
-                      value={field.name}
-                      onChange={(e) => updateColumn(idx, { name: e.target.value })}
-                      className="flex-1 h-8 text-xs"
-                    />
-                    <Select value={field.type} onValueChange={(v) => updateColumn(idx, { type: v as FieldDef["type"] })}>
-                      <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {FIELD_TYPES.map((t) => (
-                          <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Input
-                      placeholder="Description (optional)"
-                      value={field.description || ""}
-                      onChange={(e) => updateColumn(idx, { description: e.target.value })}
-                      className="flex-1 h-8 text-xs text-muted-foreground"
-                    />
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
-                      onClick={() => removeColumn(idx)}
-                      disabled={fields.length === 1}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-              <div className="px-3 pb-3">
-                <Button variant="outline" size="sm" className="w-full text-xs" onClick={addColumn}>
-                  <Plus className="h-3 w-3 mr-2" /> Add Column
-                </Button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Current fields summary — hidden */}
       </div>
 
       <div className="border-t" />
@@ -734,72 +419,31 @@ export default function ProcessDocumentsPage() {
         <NoModelWarning activeModel={activeModel} />
       </AIInstructionsSection>
 
+      </div>
+
       <div className="border-t" />
 
       {/* ── 5. Execute ──────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">5. Execute</h2>
-
-        {isProcessing && (
-          <div className="space-y-1.5">
-            <div className="flex justify-between text-xs text-muted-foreground">
-              <span>Processing {progress.completed} of {progress.total} files…</span>
-              <div className="flex items-center gap-2">
-                <span>
-                  {progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0}%
-                </span>
-                <Button
-                  variant="outline" size="sm"
-                  onClick={() => { abortRef.current = true; }}
-                  className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50"
-                >
-                  Stop
-                </Button>
-              </div>
-            </div>
-            <div className="w-full bg-muted rounded-full h-2 overflow-hidden">
-              <div
-                className="bg-primary h-full transition-all duration-300"
-                style={{
-                  width: `${progress.total > 0 ? (progress.completed / progress.total) * 100 : 0}%`,
-                }}
-              />
-            </div>
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <Button
-            variant="outline" size="lg"
-            className="h-12 text-sm border-dashed"
-            disabled={!canProcess || isProcessing || !activeModel}
-            onClick={() => processFiles("preview")}
-          >
-            {isProcessing && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Preview (1 doc)
-          </Button>
-          <Button
-            size="lg"
-            className="h-12 text-base bg-red-500 hover:bg-red-600 text-white"
-            disabled={!canProcess || isProcessing || !activeModel}
-            onClick={() => processFiles("test")}
-          >
-            {isProcessing && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Test (1 file)
-          </Button>
-          <Button
-            variant="outline" size="lg"
-            className="h-12 text-base"
-            disabled={!canProcess || isProcessing || !activeModel}
-            onClick={() => processFiles("full")}
-          >
-            {isProcessing ? (
-              <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Processing…</>
-            ) : (
-              <><FileText className="h-4 w-4 mr-2" /> Process All ({fileStates.length} file{fileStates.length !== 1 ? "s" : ""})</>
-            )}
-          </Button>
-        </div>
+        <ExecutionPanel
+          isProcessing={batch.isProcessing}
+          aborting={batch.aborting}
+          runMode={batch.runMode}
+          progress={batch.progress}
+          etaStr={batch.etaStr}
+          dataCount={fileStates.length}
+          disabled={fileStates.length === 0 || !activeModel || !customPrompt.trim()}
+          onRun={batch.run}
+          onAbort={batch.abort}
+          onResume={batch.resume}
+          onCancel={batch.clearResults}
+          failedCount={batch.failedCount}
+          skippedCount={batch.skippedCount}
+          unitLabel="files"
+          testLabel="Test (1 file)"
+          fullLabel={`Process All (${fileStates.length} file${fileStates.length !== 1 ? "s" : ""})`}
+        />
       </div>
 
       {/* ── Results ─────────────────────────────────────────────────────── */}
@@ -807,29 +451,48 @@ export default function ProcessDocumentsPage() {
         <div className="space-y-4 border-t pt-6 pb-8">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-lg font-semibold">Extracted Data</h2>
+              <h2 className="text-lg font-semibold">Results</h2>
               <p className="text-xs text-muted-foreground mt-0.5">
-                {allResults.length} records from {fileStates.filter((f) => f.status === "done").length} file(s)
+                {allResults.length} document{allResults.length !== 1 ? "s" : ""} processed
               </p>
             </div>
             <div className="flex items-center gap-3">
-              {runId && (
+              {batch.runId && (
                 <Link
-                  href={`/history/${runId}`}
+                  href={`/history/${batch.runId}`}
                   className="flex items-center gap-1.5 text-xs text-indigo-500 hover:underline"
                 >
                   <ExternalLink className="h-3 w-3" />
                   View in History
                 </Link>
               )}
+              <Button variant="outline" size="sm" className="text-xs" onClick={handleExport}>
+                Export as {OUTPUT_FORMATS.find((f) => f.value === outputFormat)?.label ?? outputFormat}
+              </Button>
             </div>
           </div>
-          <div className="border rounded-lg overflow-hidden">
-            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between">
-              <span>Extracted Data — {allResults.length} rows</span>
-              <ExportDropdown data={allResults} filename="extracted_documents" />
-            </div>
-            <DataTable data={allResults} />
+
+          <div className="space-y-4">
+            {allResults.map((result, idx) => (
+              <div key={idx} className="border rounded-lg overflow-hidden">
+                <div className="px-4 py-2.5 border-b bg-muted/20 flex items-center justify-between">
+                  <span className="text-sm font-medium truncate">{result.document_name}</span>
+                  <button
+                    onClick={() => copyToClipboard(result.output, idx)}
+                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {copiedIdx === idx ? (
+                      <><Check className="h-3 w-3 text-green-600" /> Copied</>
+                    ) : (
+                      <><Copy className="h-3 w-3" /> Copy</>
+                    )}
+                  </button>
+                </div>
+                <div className="p-4">
+                  <pre className="whitespace-pre-wrap text-sm leading-relaxed font-sans">{result.output}</pre>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

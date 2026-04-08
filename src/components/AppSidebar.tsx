@@ -15,6 +15,7 @@ import {
     Wand2,
     Sparkles,
     FileArchive,
+    TableProperties,
     AlertCircle,
     Cpu,
     ChevronUp,
@@ -80,6 +81,11 @@ const data = {
                     title: "Generate Data",
                     url: "/generate",
                     icon: Sparkles,
+                },
+                {
+                    title: "Extract Data",
+                    url: "/extract-data",
+                    icon: TableProperties,
                 },
                 {
                     title: "Process Documents",

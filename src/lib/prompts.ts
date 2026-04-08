@@ -140,9 +140,8 @@ ADJUDICATION PROCEDURE:
 5. Produce the final best answer that maximizes coding accuracy.
 
 OUTPUT:
-- Return the final codes or values directly. Plain text only.
-- No markdown, no headings, no code fences.
-- You may add one sentence explaining a key adjudication decision if workers strongly disagreed.`,
+- Return ONLY the final codes or values. No explanations, no reasoning, no commentary.
+- Plain text only. No markdown, no headings, no code fences.`,
   },
 
   "consensus.judge_enhanced": {
@@ -161,9 +160,8 @@ ADJUDICATION PROCEDURE:
 4. Produce the final consolidated code set.
 
 OUTPUT:
-- Plain text only. No markdown, no headings, no code fences.
-- Return the final answer directly.
-- Add one sentence explaining your key adjudication reasoning.`,
+- Return ONLY the final answer. No explanations, no reasoning, no commentary.
+- Plain text only. No markdown, no headings, no code fences.`,
   },
 
   // ── Codebook Generator ─────────────────────────────────────────────────────
@@ -282,6 +280,30 @@ Requirements:
 Return ONLY a valid JSON array. No explanations. No code blocks.`,
   },
 
+  "generate.freetext": {
+    id: "generate.freetext",
+    name: "Generate — Free Text",
+    category: "generate",
+    defaultValue: `You are a content generator. Produce well-written, readable plain text based on the user's request.
+Requirements:
+- Write in natural, human-readable prose or formatted text (not JSON, not code)
+- Be creative, detailed, and diverse in your output
+- Follow the structure and style implied by the user's request
+- Do not wrap output in code blocks, JSON, or any structured data format`,
+  },
+
+  "generate.markdown": {
+    id: "generate.markdown",
+    name: "Generate — Markdown",
+    category: "generate",
+    defaultValue: `You are a content generator. Produce well-written, readable content in Markdown format based on the user's request.
+Requirements:
+- Use Markdown formatting: headings (#, ##), bold, italic, lists, tables where appropriate
+- Be creative, detailed, and diverse in your output
+- Follow the structure and style implied by the user's request
+- Do not wrap output in code blocks or JSON`,
+  },
+
   // ── Automator ──────────────────────────────────────────────────────────────
   "automator.rules": {
     id: "automator.rules",
@@ -368,6 +390,19 @@ STRICTLY FORBIDDEN:
 
 FIELDS TO EXTRACT:
 {schema}`,
+  },
+
+  "document.process": {
+    id: "document.process",
+    name: "Document — Process",
+    category: "document",
+    defaultValue: `You are a document processing assistant. Process the document according to the user's instructions. Return your response as plain text.
+
+RULES:
+1. Follow the user's instructions precisely.
+2. Base your response only on the document content provided.
+3. Do not add preamble, commentary, or meta-text — return only the requested output.
+4. If the instructions ask for a specific format (bullet points, JSON, etc.), use that format.`,
   },
 
   "document.analysis": {

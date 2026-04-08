@@ -48,6 +48,8 @@ export interface BatchProcessorConfig {
 
 export interface BatchProcessorReturn {
   isProcessing: boolean;
+  /** True between Stop click and in-flight rows finishing */
+  aborting: boolean;
   runMode: RunMode;
   progress: { completed: number; total: number };
   results: Row[];
@@ -56,6 +58,8 @@ export interface BatchProcessorReturn {
   progressPct: number;
   etaStr: string;
   failedCount: number;
+  /** Number of rows skipped due to Stop */
+  skippedCount: number;
   run: (mode: RunMode) => Promise<void>;
   resume: () => Promise<void>;
   abort: () => void;
@@ -85,6 +89,10 @@ interface ProcessRowsParams {
   buildResultEntry?: (row: Row, index: number) => ResultEntry;
   runParams?: Partial<{ provider: string; model: string; temperature: number }>;
   concurrency: number;
+  /** For resume: total row count of the full dataset (not just retried rows). */
+  fullTotal?: number;
+  /** For resume: number of rows already completed before this run. */
+  initialCompleted?: number;
 }
 
 /** Runs the processing loop entirely outside React. Updates only the Zustand store. */
@@ -93,10 +101,12 @@ async function executeProcessing(params: ProcessRowsParams) {
     toolId, mode, targetData, indicesToProcess, baseResults,
     runType, activeModel, systemSettings, dataName, systemPrompt,
     processRow, buildResultEntry, runParams, concurrency,
+    fullTotal, initialCompleted,
   } = params;
 
   const store = useProcessingStore.getState();
-  const gen = store.startJob(toolId, mode, indicesToProcess.length);
+  const progressTotal = fullTotal ?? indicesToProcess.length;
+  const gen = store.startJob(toolId, mode, progressTotal, initialCompleted);
 
   const localRunId = await dispatchCreateRun({
     runType,
@@ -114,7 +124,14 @@ async function executeProcessing(params: ProcessRowsParams) {
 
   const tasks = indicesToProcess.map((originalIdx) =>
     limit(async () => {
-      if (getAbortFlag(toolId) || currentGeneration(toolId) !== gen) return;
+      if (getAbortFlag(toolId) || currentGeneration(toolId) !== gen) {
+        // Mark skipped rows so Resume can pick them up
+        mergedResults[originalIdx] = {
+          ...targetData[originalIdx],
+          status: "skipped",
+        };
+        return;
+      }
       const row = targetData[originalIdx];
       try {
         const processedRow = await processRow(row, originalIdx);
@@ -173,7 +190,15 @@ async function executeProcessing(params: ProcessRowsParams) {
 /** Launch processing and keep a strong reference in the module-level map. */
 function launchProcessing(params: ProcessRowsParams): Promise<{ mergedResults: Row[]; computedStats: Stats } | undefined> {
   const { toolId } = params;
-  const promise = executeProcessing(params).finally(() => {
+  const promise = executeProcessing(params).catch((err) => {
+    // If executeProcessing throws before completeJob, reset isProcessing
+    const job = useProcessingStore.getState().jobs[toolId];
+    if (job?.isProcessing) {
+      useProcessingStore.getState().completeJob(toolId, job.results ?? [], { success: 0, errors: 0, avgLatency: 0 }, job.runId ?? null);
+    }
+    console.error("Batch processing error:", err);
+    return undefined;
+  }).finally(() => {
     activeJobs.delete(toolId);
   });
   activeJobs.set(toolId, promise);
@@ -199,6 +224,7 @@ export function useBatchProcessor(
 
   // Fine-grained selectors — progress changes don't trigger results re-computation
   const isProcessing = useProcessingStore((s) => s.jobs[toolId]?.isProcessing ?? false);
+  const aborting = useProcessingStore((s) => s.jobs[toolId]?.aborting ?? false);
   const runMode = useProcessingStore((s) => s.jobs[toolId]?.runMode ?? "full");
   const progress = useProcessingStore((s) => s.jobs[toolId]?.progress ?? defaultProgress);
   const results = useProcessingStore((s) => s.jobs[toolId]?.results ?? emptyResults);
@@ -210,6 +236,11 @@ export function useBatchProcessor(
 
   const failedCount = useMemo(
     () => results.filter((r) => r.status === "error").length,
+    [results]
+  );
+
+  const skippedCount = useMemo(
+    () => results.filter((r) => r.status === "skipped").length,
     [results]
   );
 
@@ -289,7 +320,10 @@ export function useBatchProcessor(
 
       if (!outcome) return;
       const { mergedResults, computedStats } = outcome;
-      if (computedStats.errors > 0) {
+      const skipped = mergedResults.filter((r) => r.status === "skipped").length;
+      if (skipped > 0) {
+        toast.info(`Stopped — ${mergedResults.length - skipped - computedStats.errors} of ${mergedResults.length} completed`);
+      } else if (computedStats.errors > 0) {
         toast.warning(`Done — ${computedStats.errors} rows had errors`);
       } else {
         toast.success(
@@ -316,28 +350,31 @@ export function useBatchProcessor(
       if (!activeModel) { toast.error("No model configured. Go to Settings."); return; }
 
       const existingResults = useProcessingStore.getState().jobs[toolId]?.results ?? [];
-      const failedIndices: number[] = [];
+      const retryIndices: number[] = [];
       for (let i = 0; i < data.length; i++) {
         const existing = existingResults[i];
-        if (!existing || existing.status === "error") failedIndices.push(i);
+        if (!existing || existing.status === "error" || existing.status === "skipped") retryIndices.push(i);
       }
-      if (failedIndices.length === 0) { toast.info("No failed rows to retry"); return; }
+      if (retryIndices.length === 0) { toast.info("No incomplete rows to retry"); return; }
 
       const baseResults: Row[] = data.map((row, i) =>
-        existingResults[i] && existingResults[i].status !== "error" ? existingResults[i] : row
+        existingResults[i] && existingResults[i].status !== "error" && existingResults[i].status !== "skipped" ? existingResults[i] : row
       );
 
+      const alreadyCompleted = data.length - retryIndices.length;
       const outcome = await launchProcessing({
-        toolId, mode: "full", targetData: data, indicesToProcess: failedIndices,
+        toolId, mode: "full", targetData: data, indicesToProcess: retryIndices,
         baseResults,
         runType, activeModel, systemSettings, dataName, systemPrompt,
         processRow, buildResultEntry, runParams,
         concurrency: concurrency ?? systemSettings.maxConcurrency,
+        fullTotal: data.length,
+        initialCompleted: alreadyCompleted,
       });
 
       if (!outcome) return;
       const { mergedResults, computedStats } = outcome;
-      const retried = failedIndices.length;
+      const retried = retryIndices.length;
       if (computedStats.errors > 0) {
         toast.warning(`Resumed ${retried} rows — ${computedStats.errors} still have errors`);
       } else {
@@ -349,8 +386,8 @@ export function useBatchProcessor(
   );
 
   return {
-    isProcessing, runMode, progress, results, stats, runId,
-    progressPct, etaStr, failedCount,
+    isProcessing, aborting, runMode, progress, results, stats, runId,
+    progressPct, etaStr, failedCount, skippedCount,
     run, resume, abort, clearResults,
   };
 }

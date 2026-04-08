@@ -264,10 +264,10 @@ function HistoryContent() {
         </Select>
       </div>
 
-      {/* Runs list */}
-      <div className="space-y-2">
-        {filteredRuns.length === 0 && !isRefreshing && (
-          <div className="border border-dashed rounded-xl py-16 flex flex-col items-center justify-center text-center space-y-4">
+      {/* Runs table */}
+      <div className="border rounded-lg overflow-hidden">
+        {filteredRuns.length === 0 && !isRefreshing ? (
+          <div className="py-16 flex flex-col items-center justify-center text-center space-y-4">
             <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center">
               <History className="h-6 w-6 text-muted-foreground" />
             </div>
@@ -281,82 +281,90 @@ function HistoryContent() {
               <Link href="/">Explore Tools</Link>
             </Button>
           </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-10 bg-muted shadow-[0_1px_0_0_var(--color-border)]">
+              <tr>
+                <th className="text-left font-bold px-4 py-2.5 select-none">Status</th>
+                <th className="text-left font-bold px-4 py-2.5 select-none">File</th>
+                <th className="text-left font-bold px-4 py-2.5 select-none">Tool</th>
+                <th className="text-left font-bold px-4 py-2.5 select-none">Model</th>
+                <th className="text-left font-bold px-4 py-2.5 select-none">Date</th>
+                <th className="text-left font-bold px-4 py-2.5 select-none">Duration</th>
+                <th className="text-left font-bold px-4 py-2.5 select-none">Rows</th>
+                <th className="text-left font-bold px-4 py-2.5 select-none">Results</th>
+                <th className="text-left font-bold px-4 py-2.5 select-none">Avg Latency</th>
+                <th className="px-4 py-2.5"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRuns.map((run, i) => (
+                <tr
+                  key={run.id}
+                  onClick={() => navigateToDetail(run.id)}
+                  className={`group cursor-pointer border-t hover:bg-muted/40 transition-colors ${i % 2 === 0 ? "" : "bg-muted/10"}`}
+                >
+                  <td className="px-4 py-2.5">
+                    <div
+                      className={`h-7 w-7 rounded-md flex items-center justify-center ${
+                        run.status === "completed"
+                          ? "bg-green-50 dark:bg-green-950/30 text-green-600"
+                          : "bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600"
+                      }`}
+                    >
+                      {run.status === "completed" ? (
+                        <CheckCircle2 className="h-4 w-4" />
+                      ) : (
+                        <Play className="h-4 w-4" />
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-2.5 font-medium max-w-[200px] truncate">{run.inputFile}</td>
+                  <td className="px-4 py-2.5">
+                    <Badge variant="outline" className="text-[10px] capitalize px-1.5 py-0">
+                      {run.runType}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                      {run.provider}/{run.model}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-2.5 text-muted-foreground text-xs whitespace-nowrap">
+                    {new Date(run.startedAt).toLocaleDateString()}{" "}
+                    {new Date(run.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-muted-foreground">
+                    {run.completedAt ? formatDuration(run.startedAt, run.completedAt) : "—"}
+                  </td>
+                  <td className="px-4 py-2.5 text-xs">{run.inputRows}</td>
+                  <td className="px-4 py-2.5 text-xs">
+                    <span className="text-green-600 font-medium">{run.successCount}</span>
+                    {" / "}
+                    <span className={run.errorCount > 0 ? "text-red-500 font-medium" : "text-muted-foreground"}>{run.errorCount}</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-xs text-muted-foreground">
+                    {run.avgLatency ? `${(run.avgLatency / 1000).toFixed(2)}s` : "—"}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(run.id); }}
+                        className="h-7 w-7 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-red-500"
+                        title="Delete run"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                      <div className="h-7 w-7 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground">
+                        <ArrowRight className="h-3.5 w-3.5" />
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
-
-        {filteredRuns.map((run) => (
-          <div
-            key={run.id}
-            onClick={() => navigateToDetail(run.id)}
-            className="group flex items-center p-4 gap-4 rounded-xl border bg-card hover:border-indigo-300 dark:hover:border-indigo-700 transition-all duration-150 hover:shadow-sm cursor-pointer"
-          >
-            <div
-              className={`h-10 w-10 rounded-lg flex items-center justify-center shrink-0 ${
-                run.status === "completed"
-                  ? "bg-green-50 dark:bg-green-950/30 text-green-600"
-                  : "bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600"
-              }`}
-            >
-              {run.status === "completed" ? (
-                <CheckCircle2 className="h-5 w-5" />
-              ) : (
-                <Play className="h-5 w-5" />
-              )}
-            </div>
-
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="font-semibold truncate text-sm">{run.inputFile}</span>
-                <Badge variant="outline" className="text-[10px] capitalize px-1 py-0 shrink-0">
-                  {run.runType}
-                </Badge>
-                <Badge variant="secondary" className="text-[10px] px-1 py-0 shrink-0">
-                  {run.provider}/{run.model}
-                </Badge>
-              </div>
-              <div className="flex items-center gap-4 text-[10px] text-muted-foreground">
-                <div className="flex items-center gap-1">
-                  <Calendar className="h-3 w-3" />
-                  {new Date(run.startedAt).toLocaleDateString()}
-                </div>
-                <div className="flex items-center gap-1">
-                  <Clock className="h-3 w-3" />
-                  {new Date(run.startedAt).toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </div>
-                {run.completedAt && (
-                  <div className="flex items-center gap-1">
-                    <Clock className="h-3 w-3" />
-                    {formatDuration(run.startedAt, run.completedAt)}
-                  </div>
-                )}
-                <span className="font-medium text-foreground">
-                  {run.successCount} Success / {run.errorCount} Error
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3 shrink-0">
-              <div className="text-right hidden sm:block">
-                <div className="text-[10px] font-medium text-foreground">
-                  {run.avgLatency ? `${(run.avgLatency / 1000).toFixed(2)}s avg` : "N/A"}
-                </div>
-                <div className="text-[9px] text-muted-foreground">{run.inputRows} rows</div>
-              </div>
-              <button
-                onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(run.id); }}
-                className="h-8 w-8 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-red-500"
-                title="Delete run"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-              <div className="h-8 w-8 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground">
-                <ArrowRight className="h-4 w-4" />
-              </div>
-            </div>
-          </div>
-        ))}
       </div>
 
       {/* Delete confirmation dialog */}

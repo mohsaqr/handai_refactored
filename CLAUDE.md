@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Handai is a qualitative/quantitative data analysis suite powered by LLMs. It runs as a Next.js web app with an optional static export for GitHub Pages. Users upload CSV/XLSX files, pick an analysis tool and LLM provider, and run batch processing. Results are stored in SQLite (web) or IndexedDB (static) and exportable as CSV.
+Handai is a qualitative/quantitative data analysis suite powered by LLMs. Built with Next.js 16, React 19, TypeScript (strict), Tailwind CSS v4, and Vercel AI SDK. Ships as a web app, a static export for GitHub Pages, and a Tauri v2 desktop app. Users upload CSV/XLSX files, pick an analysis tool and LLM provider, and run batch processing. Results are stored in SQLite (web), IndexedDB (static/browser-storage), or SQLite via Tauri plugin (desktop) and exportable as CSV.
 
 ## Prerequisites
 
@@ -40,28 +40,31 @@ For web deployments, server-side API key defaults can be set in `.env.local` (e.
 
 For exhaustive detail, see `ARCHITECTURE.md`. Below is what you need to get productive quickly.
 
-### Dual LLM Dispatch
+### LLM Dispatch (two runtime paths)
 
 The same React components work across two runtime contexts, but LLM calls and persistence take different paths:
 
-- **Web**: Browser → `/api/process-row` (Next.js API route) → `src/lib/ai/providers.ts` (`getModel()`) → Provider API. Results logged via Prisma to SQLite.
-- **Static (GitHub Pages)**: Browser → `src/lib/llm-browser.ts` (`getModel()`) → Provider API direct. Results logged via `src/lib/db-indexeddb.ts` to IndexedDB (no server).
+- **Web (server)**: Browser → `/api/process-row` (Next.js API route) → `src/lib/ai/providers.ts` (`getModel()`) → Provider API. Results logged via Prisma to SQLite.
+- **Browser-direct** (static builds, `NEXT_PUBLIC_BROWSER_STORAGE=1`, or Tauri desktop): Browser/WebView → `src/lib/llm-browser.ts` (`getModel()`) → Provider API direct. Results logged via `src/lib/db-indexeddb.ts` (IndexedDB) or `src/lib/db-tauri.ts` (Tauri SQLite). API keys stay in browser; local models work from user's machine.
 
-`src/lib/llm-dispatch.ts` is the unified dispatch layer — tool pages call its functions (e.g., `dispatchProcessRow`, `dispatchCreateRun`, `dispatchSaveResults`) which internally branch on `isStatic` (checks `NEXT_PUBLIC_STATIC === "1"`). Use dispatch functions instead of checking runtime context in page code.
+`src/lib/llm-dispatch.ts` is the unified dispatch layer — tool pages call its functions (e.g., `dispatchProcessRow`, `dispatchCreateRun`, `dispatchSaveResults`) which internally branch on `useBrowserStorage` (`NEXT_PUBLIC_STATIC=1` OR `NEXT_PUBLIC_BROWSER_STORAGE=1`). Use dispatch functions instead of checking runtime context in page code.
 
 ### Build Targets
 
-Controlled by `STATIC_BUILD` env var in `next.config.ts`:
+Controlled by env vars in `next.config.ts`:
 - `output: "standalone"` (default) — web deployment/Docker
 - `output: "export"` (when `STATIC_BUILD=1`) — static HTML for GitHub Pages (adds `basePath` + `assetPrefix` via `PAGES_BASE_PATH`)
+- `output: "export"` (when `TAURI_BUILD=1`) — static HTML bundled into Tauri v2 desktop app (`desktop/tauri/`)
 
 The `build:static` script (`bash scripts/build-static.sh`) temporarily moves `src/app/api/` and `src/app/history/[id]/page.tsx` out of the source tree (bash `trap` ensures restore on exit) because `output: "export"` cannot include API routes or dynamic routes.
+
+Tauri desktop uses `@tauri-apps/plugin-sql` for SQLite persistence and a Rust `save_file` command for native OS save dialogs. Runtime detection: `"__TAURI_INTERNALS__" in window`.
 
 ### Key Libraries
 
 | Layer | What | Where |
 |---|---|---|
-| Provider registry | `getModel()` — returns Vercel AI SDK model for any of 10 providers | `src/lib/ai/providers.ts` |
+| Provider registry | `getModel()` — returns Vercel AI SDK `LanguageModelV3` for any of 10 providers (pure `fetch`, no Node.js APIs — runs in both server and browser) | `src/lib/ai/providers.ts` |
 | Unified dispatch | Static/Web branching for LLM calls, run history, and results | `src/lib/llm-dispatch.ts` |
 | State | Zustand store persisted to localStorage as `handai-storage` | `src/lib/store.ts` |
 | Validation | Zod schemas for all API route request bodies | `src/lib/validation.ts` |
@@ -69,7 +72,10 @@ The `build:static` script (`bash scripts/build-static.sh`) temporarily moves `sr
 | Prompts | Prompt registry with per-tool localStorage overrides | `src/lib/prompts.ts` |
 | Analytics | Cohen's kappa, pairwise agreement calculations | `src/lib/analytics.ts` |
 | DB (web) | Prisma 6 + SQLite (`prisma/dev.db`) | `src/lib/prisma.ts` |
-| DB (Static) | IndexedDB for GitHub Pages static builds | `src/lib/db-indexeddb.ts` |
+| DB (browser) | IndexedDB for static + browser-storage mode | `src/lib/db-indexeddb.ts` |
+| DB (desktop) | Tauri SQLite via `@tauri-apps/plugin-sql` | `src/lib/db-tauri.ts` |
+| Processing state | Zustand store for cross-navigation batch processing persistence | `src/lib/processing-store.ts` |
+| Session restore | Transfers run history payload back to tool pages | `src/lib/restore-store.ts` |
 | CSV export | `downloadCSV()` — blob download | `src/lib/export.ts` |
 | Types | Shared interfaces (Row, ProviderConfig, RunMeta, etc.) | `src/types/index.ts` |
 
@@ -98,17 +104,28 @@ Schema at `prisma/schema.prisma`. Key models:
 
 Each tool is a page at `src/app/<tool-name>/page.tsx`. Pages are `"use client"` components that use the Zustand store for provider config and `p-limit` for concurrency control (governed by `systemSettings.maxConcurrency`).
 
-12 tool pages: `abstract-screener`, `ai-coder`, `automator`, `codebook-generator`, `consensus-coder`, `generate`, `model-comparison`, `process-documents`, `qualitative-coder`, `transform` + `settings` and `history` (with `history/[id]` dynamic route).
+13 tool pages: `abstract-screener`, `ai-coder`, `automator`, `codebook-generator`, `consensus-coder`, `generate`, `manual-coder`, `model-comparison`, `process-documents`, `qualitative-coder`, `transform` + `settings` and `history` (with `history/[id]` dynamic route).
 
 ### Shared Hooks (`src/hooks/`)
 
 | Hook | Purpose |
 |---|---|
-| `useBatchProcessor` | Reusable parallel batch LLM processing with progress, abort, resume, stats, and run history logging. Used by most tool pages. |
+| `useBatchProcessor` | Reusable parallel batch LLM processing with progress, abort, resume, stats, and run history logging. Used by most tool pages (7 of 10 tools). |
+| `useAIInstructions` | Manages AI instruction text with localStorage persistence. |
 | `useColumnSelection` | Manages which CSV columns are selected for processing. |
 | `usePersistedPrompt` | Persists a prompt textarea to localStorage with a given key. |
 | `useProcessingFlag` | Registers processing status in global store for sidebar indicators. |
 | `useRestoreSession` | Consumes session restore payload from history page. |
+
+**Note:** `codebook-generator`, `generate`, and `process-documents` do not yet use `useBatchProcessor` — they have custom processing loops.
+
+### Processing Persistence
+
+Batch processing survives page navigation via a module-level architecture:
+
+- `src/lib/processing-store.ts` — Zustand store holding global processing state (`isProcessing`, `aborting`, `progress`, `results`, `stats`, `runId`). Uses module-level abort flags outside Zustand and generation counters to prevent stale loops from updating superseded runs. Progress updates are batched via `requestAnimationFrame`.
+- `src/hooks/useBatchProcessor.ts` — Runs the processing loop at module level (not inside React), so it survives component unmount. An `activeJobs` Map keyed by `toolId` holds strong references to running promises. React only launches and reads state.
+- Sidebar shows a pulsing blue dot for tools with active processing (`useProcessingFlag`).
 
 ### Shared Tool Components (`src/components/tools/`)
 
@@ -122,6 +139,8 @@ Each tool is a page at `src/app/<tool-name>/page.tsx`. Pages are `"use client"` 
 | `PromptEditor` | Textarea with prompt persistence and reset-to-default |
 | `DataTable` | Sortable/filterable table for displaying Row[] data |
 | `FileUploader` | Drag-and-drop file upload zone |
+| `AIInstructionsSection` | AI instructions textarea with persistence |
+| `SampleDatasetPicker` | Dropdown to load built-in sample datasets for testing |
 
 UI primitives from shadcn/ui in `src/components/ui/`.
 
@@ -136,7 +155,7 @@ AI Coder (`src/app/ai-coder/`) is the most complex tool page. Unlike other tools
 Key state in page.tsx:
 - `codingData: Record<number, string[]>` — Human-applied codes per row index
 - `aiData: Record<number, AISuggestion>` — AI suggestions per row (codes + confidence + reasoning)
-- `codebook: CodeEntry[]` — Code definitions (code, description, highlights) — replaces the old `codes: string[]`
+- `codebook: CodeEntry[]` — Code definitions (code, description, highlights)
 - `settings: AICSettings` — 6 UI settings (contextRows, autoAdvance, lightMode, horizontalCodes, buttonsAboveText, autoAcceptThreshold)
 
 localStorage keys: `aic_autosave` (session recovery), `aic_settings` (UI settings), `aic_named_sessions` (saved sessions), `handai_codebook_aicoder` (codebook persistence).

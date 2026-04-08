@@ -29,14 +29,14 @@ export function ResultsPanel({
 
   return (
     <div className="space-y-4 border-t pt-6 pb-8">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <div>
           <h2 className="text-lg font-semibold">{title}</h2>
           <p className="text-xs text-muted-foreground mt-0.5">
             {defaultSubtitle}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           {runId && (
             <Link
               href={`/history/${runId}`}
@@ -52,11 +52,13 @@ export function ResultsPanel({
 
       {children}
 
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-medium text-muted-foreground">{results.length} rows</span>
-        <ExportDropdown data={results as Record<string, unknown>[]} filename="results" />
+      <div className="border rounded-lg overflow-hidden">
+        <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between flex-wrap gap-2">
+          <span>{title} — {results.length} rows</span>
+          <ExportDropdown data={results as Record<string, unknown>[]} filename="results" />
+        </div>
+        <DataTable data={results} />
       </div>
-      <DataTable data={results} />
     </div>
   );
 }

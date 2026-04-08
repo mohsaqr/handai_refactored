@@ -119,15 +119,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { provider, model, apiKey, baseUrl, rowCount, columns, freeformPrompt, temperature, systemPrompt: incomingSystemPrompt } =
+    const { provider, model, apiKey, baseUrl, rowCount, columns, freeformPrompt, outputFormat, temperature, systemPrompt: incomingSystemPrompt } =
       parsed.data;
 
+    const isFreetext = outputFormat === "freetext" || outputFormat === "markdown";
     const aiModel = getModel(provider, model, apiKey, baseUrl);
 
     let systemPrompt: string;
     let userPrompt: string;
 
-    if (incomingSystemPrompt) {
+    if (isFreetext) {
+      systemPrompt = incomingSystemPrompt || getPrompt(outputFormat === "markdown" ? "generate.markdown" : "generate.freetext");
+      userPrompt = freeformPrompt ?? "Generate realistic content.";
+    } else if (incomingSystemPrompt) {
       systemPrompt = incomingSystemPrompt;
       if (columns && columns.length > 0) {
         const colDefs = columns
@@ -163,6 +167,10 @@ export async function POST(req: NextRequest) {
       () => generateText(genOpts),
       { maxAttempts: 3, baseDelayMs: 200 }
     );
+
+    if (isFreetext) {
+      return NextResponse.json({ rows: [], rawCsv: text, count: 0, raw: text });
+    }
 
     const cleaned = text.replace(/^```(?:json(?:l)?|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
     const expectedCols = columns?.map((c) => c.name);

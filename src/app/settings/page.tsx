@@ -351,7 +351,7 @@ export default function SettingsPage() {
       </nav>
 
       {/* ── Main content ────────────────────────────────────── */}
-      <div className="flex-1 min-w-0 max-w-3xl space-y-14 pb-20">
+      <div className="flex-1 min-w-0 max-w-5xl space-y-14 pb-20">
 
         {/* ── AI Providers ───────────────────────────────────── */}
         <section ref={providersRef}>

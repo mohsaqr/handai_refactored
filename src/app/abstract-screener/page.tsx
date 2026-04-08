@@ -17,6 +17,7 @@ import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { downloadCSV, downloadXLSX } from "@/lib/export";
 import { useActiveModel, useSystemSettings } from "@/lib/hooks";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
+import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { dispatchProcessRow } from "@/lib/llm-dispatch";
 import { toast } from "sonner";
 import {
@@ -25,10 +26,12 @@ import {
 } from "@/components/ui/dialog";
 import {
   Save, FolderOpen, BarChart2, Download, X, Trash2,
-  AlertCircle, ChevronDown, ChevronRight,
-  Highlighter,
+  AlertCircle, ChevronDown, ChevronLeft, ChevronRight,
+  Highlighter, Loader2, Play,
+  RotateCcw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScreenerAnalyticsPanel } from "./ScreenerAnalyticsDialog";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -240,16 +243,16 @@ function parseWordList(raw: string): string[] {
 
 export default function AbstractScreenerPage() {
   // ── Core state ─────────────────────────────────────────────────────────────
-  const [data, setData]                 = useState<Row[]>([]);
-  const [aiResults, setAiResults]       = useState<Record<number, AIScreenResult>>({});
-  const [decisions, setDecisions]       = useState<Record<number, Decision>>({});
-  const [includeCriteria, setIncludeCriteria] = useState("");
-  const [excludeCriteria, setExcludeCriteria] = useState("");
-  const [colMap, setColMap]             = useState<ColMap>({ title: "", abstract: "", keywords: "", journal: "" });
-  const [wordHighlighter, setWordHighlighter] = useState<WordHighlighter>({ include: "", exclude: "" });
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [dataName, setDataName]         = useState("");
-  const [sessionName, setSessionName]   = useState("");
+  const [data, setData]                 = useSessionState<Row[]>("abscreen_data", []);
+  const [aiResults, setAiResults]       = useSessionState<Record<number, AIScreenResult>>("abscreen_aiResults", {});
+  const [decisions, setDecisions]       = useSessionState<Record<number, Decision>>("abscreen_decisions", {});
+  const [includeCriteria, setIncludeCriteria] = useSessionState("abscreen_includeCriteria", "");
+  const [excludeCriteria, setExcludeCriteria] = useSessionState("abscreen_excludeCriteria", "");
+  const [colMap, setColMap]             = useSessionState<ColMap>("abscreen_colMap", { title: "", abstract: "", keywords: "", journal: "" });
+  const [wordHighlighter, setWordHighlighter] = useSessionState<WordHighlighter>("abscreen_wordHighlighter", { include: "", exclude: "" });
+  const [currentIndex, setCurrentIndex] = useSessionState("abscreen_currentIndex", 0);
+  const [dataName, setDataName]         = useSessionState("abscreen_dataName", "");
+  const [sessionName, setSessionName]   = useSessionState("abscreen_sessionName", "");
 
   const criteria = includeCriteria || excludeCriteria
     ? `Include if:\n${includeCriteria}\n\nExclude if:\n${excludeCriteria}`
@@ -262,11 +265,13 @@ export default function AbstractScreenerPage() {
   const [showHighlighter, setShowHighlighter] = useState(false);
   const [showAnalytics, setShowAnalytics]   = useState(false);
   const [showTable, setShowTable]           = useState(false);
+  const [tablePage, setTablePage]           = useState(0);
   const [tableFilter, setTableFilter]       = useState<"all" | "include" | "exclude" | "maybe" | "undecided">("all");
   const [showSessions, setShowSessions]     = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showAIReasoning, setShowAIReasoning] = useState(false);
   const [sessions, setSessions]             = useState<ASSession[]>([]);
+  const [pendingDeleteSession, setPendingDeleteSession] = useState<string | null>(null);
   const [settings, setSettings]             = useState<ASSettings>({ autoAdvance: false, lightMode: true, horizontalDecisions: true, buttonsAboveText: false });
   const [recovered, setRecovered]           = useState<{ count: number; savedAt: string; sessionName: string } | null>(null);
   const [autosaveTime, setAutosaveTime]     = useState<Date | null>(null);
@@ -585,6 +590,29 @@ export default function AbstractScreenerPage() {
     if (!restored) return;
     setData(restored.data as Row[]);
     setDataName(restored.dataName);
+
+    const fullPrompt = restored.systemPrompt ?? "";
+
+    // Restore criteria (include/exclude)
+    const includeMatch = fullPrompt.match(/Include if:\n([\s\S]*?)(?:\n\nExclude if:|$)/);
+    const excludeMatch = fullPrompt.match(/Exclude if:\n([\s\S]*?)(?:\n\n|$)/);
+    if (includeMatch) setIncludeCriteria(includeMatch[1].trim());
+    if (excludeMatch) setExcludeCriteria(excludeMatch[1].trim());
+
+    // Restore column mapping
+    const mapMatch = fullPrompt.match(/COLUMN MAPPING:\n([\s\S]*?)(?:\n\n|$)/);
+    if (mapMatch) {
+      const newMap: ColMap = { title: "", abstract: "", keywords: "", journal: "" };
+      mapMatch[1].split("\n").forEach((l) => {
+        const m = l.match(/^- (\w+): (.+)$/);
+        if (m) {
+          const field = m[1] as keyof ColMap;
+          if (field in newMap) newMap[field] = m[2].trim();
+        }
+      });
+      setColMap(newMap);
+    }
+
     toast.success(`Restored session from "${restored.dataName}" (${restored.data.length} rows)`);
   }, [restored]);
 
@@ -826,8 +854,8 @@ export default function AbstractScreenerPage() {
           </p>
         </div>
         {data.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setAiResults({}); setDecisions({}); setIncludeCriteria(""); setExcludeCriteria(""); setCurrentIndex(0); batch.clearResults(); }}>
-            Start Over
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("abscreen_"); setData([]); setDataName(""); setAiResults({}); setDecisions({}); setIncludeCriteria(""); setExcludeCriteria(""); setCurrentIndex(0); setColMap({ title: "", abstract: "", keywords: "", journal: "" }); setWordHighlighter({ include: "", exclude: "" }); setSessionName(""); setConcurrency(5); setAiInstructions(""); batch.clearResults(); }}>
+            <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
         )}
       </div>
@@ -853,35 +881,64 @@ export default function AbstractScreenerPage() {
         </div>
       )}
 
-      {/* ── Session resume (when no data loaded) ─────────────────────────── */}
-      {data.length === 0 && sessions.length > 0 && (
-        <div className="border rounded-xl overflow-hidden mb-4">
-          <div className="px-4 py-3 border-b font-medium text-sm">Resume a Session</div>
-          <div className="p-3 space-y-2">
-            {sessions.slice(0, 5).map((s) => {
-              const decided = Object.values(s.decisions || {}).filter(Boolean).length;
-              return (
-                <div key={s.name} className="flex items-center justify-between p-2.5 rounded border hover:bg-muted/30">
-                  <div>
-                    <div className="text-sm font-medium">{s.name}</div>
-                    <div className="text-[10px] text-muted-foreground">
-                      {s.data.length} records · {decided} screened · {new Date(s.savedAt).toLocaleDateString()}
+      {/* ── Session resume ────────────────────────────────────────────────── */}
+      {sessions.length > 0 && (
+        <Collapsible className="border rounded-xl overflow-hidden mb-4">
+          <CollapsibleTrigger className="flex items-center gap-2 w-full px-4 py-3 text-sm font-medium hover:bg-muted/30 transition-colors">
+            <ChevronRight className="h-3.5 w-3.5 transition-transform [[data-state=open]_&]:rotate-90" />
+            Resume a Session
+            <span className="text-xs text-muted-foreground font-normal ml-auto">{sessions.length} saved</span>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="p-3 pt-0 space-y-2">
+              {sessions.slice(0, 5).map((s) => {
+                const decided = Object.values(s.decisions || {}).filter(Boolean).length;
+                return (
+                  <div key={s.name} className="flex items-center justify-between p-2.5 rounded border hover:bg-muted/30">
+                    <div>
+                      <div className="text-sm font-medium">{s.name}</div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {s.data.length} records · {decided} screened · {new Date(s.savedAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <Button size="sm" variant="outline" onClick={() => loadSession(s)}>Load</Button>
+                      <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        onClick={() => setPendingDeleteSession(s.name)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
                   </div>
-                  <div className="flex gap-1.5">
-                    <Button size="sm" variant="outline" onClick={() => loadSession(s)}>Load</Button>
-                    <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                      onClick={() => { deleteStoredSession(s.name); setSessions(listSessions()); }}>
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+                );
+              })}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
       )}
 
+      {/* Delete session confirmation */}
+      <Dialog open={!!pendingDeleteSession} onOpenChange={(open) => { if (!open) setPendingDeleteSession(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete session?</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete &ldquo;{pendingDeleteSession}&rdquo;? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingDeleteSession(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={() => {
+              if (pendingDeleteSession) {
+                deleteStoredSession(pendingDeleteSession);
+                setSessions(listSessions());
+                setPendingDeleteSession(null);
+              }
+            }}>Delete</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
@@ -1033,6 +1090,8 @@ export default function AbstractScreenerPage() {
         <NoModelWarning activeModel={activeModel} />
       </AIInstructionsSection>
 
+      </div>
+
       <div className="border-t" />
 
       {/* ── 5. Screen Data ────────────────────────────────────────────────── */}
@@ -1042,69 +1101,107 @@ export default function AbstractScreenerPage() {
         {data.length > 0 && (
           <div className="space-y-3">
 
-            {/* ── AI Batch Processing (collapsible) ────────────────────── */}
-            <div className="border rounded-lg overflow-hidden">
-              <button
-                onClick={() => setShowBatchPanel((v) => !v)}
-                className="flex items-center justify-between w-full px-3 py-2 text-sm hover:bg-muted/30 transition-colors"
-              >
-                <span className="font-medium">AI Batch Processing</span>
-                <span className="text-muted-foreground text-xs">{showBatchPanel ? "▲" : "▼"}</span>
-              </button>
-              {showBatchPanel && (
-                <div className="border-t p-3 space-y-3">
-                  {!batch.isProcessing ? (
-                    <>
-                      <div className="flex items-center gap-4 text-xs">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-muted-foreground">Concurrency:</span>
-                          <Button variant="outline" size="sm" className="h-6 w-6 p-0"
-                            onClick={() => setConcurrency((c) => Math.max(1, c - 1))}>−</Button>
-                          <span className="w-5 text-center font-mono">{concurrency}</span>
-                          <Button variant="outline" size="sm" className="h-6 w-6 p-0"
-                            onClick={() => setConcurrency((c) => Math.min(20, c + 1))}>+</Button>
-                        </div>
-                        {activeModel && (
-                          <span className="text-muted-foreground">
-                            Model: <strong>{activeModel.defaultModel}</strong>
-                          </span>
+            {/* ── AI Batch Processing ────────────────────────────────────── */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-4 flex-wrap">
+                <span className="text-sm font-medium">AI Batch Processing</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">Concurrency:</span>
+                  <Button size="sm" variant="outline" className="h-7 w-7 p-0" onClick={() => setConcurrency((c) => Math.max(1, c - 1))}>−</Button>
+                  <span className="text-sm font-mono w-6 text-center">{concurrency}</span>
+                  <Button size="sm" variant="outline" className="h-7 w-7 p-0" onClick={() => setConcurrency((c) => Math.min(20, c + 1))}>+</Button>
+                </div>
+                {activeModel && (
+                  <span className="text-xs text-muted-foreground">
+                    Model: <span className="text-foreground">{activeModel.defaultModel}</span>
+                  </span>
+                )}
+                {!batch.isProcessing && (
+                  <div className="flex items-center gap-2 ml-auto">
+                    <Button
+                      onClick={() => void batch.run("test")}
+                      disabled={!canRunAI || data.length === 0}
+                      size="sm"
+                      variant="outline"
+                    >
+                      Test ({Math.min(10, totalRows)} rows)
+                    </Button>
+                    <Button
+                      onClick={() => void batch.run("full")}
+                      disabled={!canRunAI || data.length === 0}
+                      size="sm"
+                      className="bg-red-500 hover:bg-red-600 text-white"
+                    >
+                      Full Batch ({totalRows} rows)
+                    </Button>
+                  </div>
+                )}
+              </div>
+              {(() => {
+                const incompleteCount = batch.failedCount + batch.skippedCount;
+                const isStopped = !batch.isProcessing && incompleteCount > 0;
+                const completedOk = batch.progress.total - incompleteCount;
+                if (batch.isProcessing || isStopped) return (
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-xs text-muted-foreground flex-wrap gap-1">
+                      <span className="flex items-center gap-1.5">
+                        {batch.isProcessing ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            {batch.aborting
+                              ? "Stopping — waiting for in-flight rows..."
+                              : `Processing ${batch.progress.total} rows...`}
+                            {!batch.aborting && batch.etaStr && (
+                              <span className="text-muted-foreground ml-1">{batch.etaStr}</span>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            Stopped — {completedOk} of {batch.progress.total} completed
+                            {batch.failedCount > 0 && (
+                              <span className="text-red-500 ml-1">({batch.failedCount} errors)</span>
+                            )}
+                          </>
+                        )}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        {batch.isProcessing && (
+                          <span>{batch.progress.completed} / {batch.progress.total}</span>
+                        )}
+                        {batch.isProcessing && !batch.aborting && (
+                          <Button variant="outline" size="sm" onClick={batch.abort}
+                            className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                            Stop
+                          </Button>
+                        )}
+                        {isStopped && (
+                          <>
+                            <Button variant="outline" size="sm" onClick={() => void batch.resume()}
+                              className="h-6 px-2 text-[11px] border-green-300 text-green-700 hover:bg-green-50">
+                              <Play className="h-3 w-3 mr-1" />
+                              Resume ({incompleteCount} rows)
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={batch.clearResults}
+                              className="h-6 px-2 text-[11px] border-muted-foreground/30 text-muted-foreground hover:bg-muted">
+                              <X className="h-3 w-3 mr-1" />
+                              Cancel
+                            </Button>
+                          </>
                         )}
                       </div>
-                      <Button size="sm" disabled={!canRunAI || data.length === 0}
-                        onClick={() => void batch.run("full")}
-                        className="bg-orange-500 hover:bg-orange-600 text-white w-full">
-                        Run AI Batch ({totalRows} rows)
-                      </Button>
-                      {batch.failedCount > 0 && (
-                        <Button size="sm" variant="outline"
-                          onClick={() => void batch.resume()}
-                          className="w-full border-amber-300 text-amber-700 hover:bg-amber-50">
-                          Retry {batch.failedCount} failed rows
-                        </Button>
-                      )}
-                      {aiCount > 0 && (
-                        <p className="text-xs text-green-600">✓ AI suggestions ready for {aiCount}/{totalRows} rows</p>
-                      )}
-                    </>
-                  ) : (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-sm">
-                        <span>Processing {batch.progress.total} rows… {batch.progress.completed}/{batch.progress.total}
-                          {batch.failedCount > 0 && <span className="text-amber-600 ml-2">({batch.failedCount} errors)</span>}
-                          {batch.etaStr && <span className="text-muted-foreground ml-2">{batch.etaStr}</span>}
-                        </span>
-                        <Button variant="outline" size="sm" onClick={batch.abort}
-                          className="border-red-300 text-red-600 hover:bg-red-50">
-                          Stop
-                        </Button>
-                      </div>
-                      <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
-                        <div className="bg-orange-500 h-full transition-all duration-300 rounded-full"
-                          style={{ width: `${batch.progressPct}%` }} />
-                      </div>
                     </div>
-                  )}
-                </div>
+                    <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
+                      <div
+                        className={`${isStopped || batch.aborting ? "bg-amber-400" : "bg-black dark:bg-white"} h-full transition-all duration-300 rounded-full`}
+                        style={{ width: `${isStopped && batch.progress.total > 0 ? Math.round((completedOk / batch.progress.total) * 100) : batch.progressPct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+                return null;
+              })()}
+              {!batch.isProcessing && batch.failedCount === 0 && batch.skippedCount === 0 && aiCount > 0 && (
+                <p className="text-xs text-green-600">✓ AI suggestions ready for {aiCount}/{totalRows} rows</p>
               )}
             </div>
 
@@ -1172,7 +1269,7 @@ export default function AbstractScreenerPage() {
 
             {/* ── Content: Abstract display card ────────────────────────── */}
             <div className={cn(
-              "border rounded-xl overflow-hidden max-w-4xl",
+              "border rounded-xl overflow-hidden w-full",
               settings.lightMode ? "bg-slate-50 dark:bg-slate-900/50" : "bg-slate-900 text-slate-100"
             )}>
               <div className="p-5 space-y-3 break-words">
@@ -1209,35 +1306,6 @@ export default function AbstractScreenerPage() {
                 )}
               </div>
             </div>
-
-            {/* AI result badge + reasoning */}
-            {currentAI && (
-              <div className="flex items-start gap-3 px-4 py-3 border rounded-lg">
-                <span className={cn(
-                  "shrink-0 text-xs font-bold px-2.5 py-1 rounded-full uppercase tracking-wide",
-                  currentAI.decision === "include"
-                    ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                    : currentAI.decision === "maybe"
-                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                    : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                )}>
-                  AI: {(["include", "maybe", "exclude"] as const)
-                    .filter((d) => (currentAI.probabilities?.[d] ?? 0) > 0)
-                    .map((d) => `${d.charAt(0).toUpperCase() + d.slice(1)} ${Math.round((currentAI.probabilities?.[d] ?? 0) * 100)}%`)
-                    .join(", ")}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <button onClick={() => setShowAIReasoning((v) => !v)}
-                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-                    {showAIReasoning ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                    {showAIReasoning ? "Hide" : "Show"} reasoning
-                  </button>
-                  {showAIReasoning && currentAI.reasoning && (
-                    <p className="text-xs text-muted-foreground mt-1 italic">{currentAI.reasoning}</p>
-                  )}
-                </div>
-              </div>
-            )}
 
             {/* ── Decision buttons (below text if setting off) ─────────── */}
             {!settings.buttonsAboveText && (
@@ -1281,11 +1349,40 @@ export default function AbstractScreenerPage() {
               </div>
             )}
 
+            {/* AI result badge + reasoning */}
+            {currentAI && (
+              <div className="flex items-start gap-3 px-4 py-3 border rounded-lg">
+                <span className={cn(
+                  "shrink-0 text-xs font-bold px-2.5 py-1 rounded-full uppercase tracking-wide",
+                  currentAI.decision === "include"
+                    ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                    : currentAI.decision === "maybe"
+                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                    : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                )}>
+                  AI: {(["include", "maybe", "exclude"] as const)
+                    .filter((d) => (currentAI.probabilities?.[d] ?? 0) > 0)
+                    .map((d) => `${d.charAt(0).toUpperCase() + d.slice(1)} ${Math.round((currentAI.probabilities?.[d] ?? 0) * 100)}%`)
+                    .join(", ")}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <button onClick={() => setShowAIReasoning((v) => !v)}
+                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+                    {showAIReasoning ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                    {showAIReasoning ? "Hide" : "Show"} reasoning
+                  </button>
+                  {showAIReasoning && currentAI.reasoning && (
+                    <p className="text-xs text-muted-foreground mt-1 italic">{currentAI.reasoning}</p>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* ── Ask AI (per-row) ─────────────────────────────────────── */}
             {activeModel && (
               <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm"
-                  className="border-orange-300 text-orange-600 hover:bg-orange-50 dark:border-orange-700 dark:text-orange-400"
+                  className="border-red-400 text-red-600 hover:bg-red-50 dark:border-red-700 dark:text-red-400"
                   disabled={askingAI || !canRunAI}
                   onClick={() => void askAI()}>
                   {askingAI ? "Asking AI…" : currentAI ? "Refresh AI" : "Ask AI"}
@@ -1302,16 +1399,16 @@ export default function AbstractScreenerPage() {
 
             {/* ── Navigation bar (5 elements) ──────────────────────────── */}
             <div className="grid grid-cols-5 gap-1.5 items-center">
-              <Button variant="outline" size="sm" onClick={() => setCurrentIndex(0)}
+              <Button variant="destructive" className="gap-2 px-5" onClick={() => setCurrentIndex(0)}
                 disabled={currentIndex === 0}>◀◀</Button>
-              <Button variant="outline" size="sm" onClick={() => navigate(-1)}
+              <Button variant="destructive" className="gap-2 px-5" onClick={() => navigate(-1)}
                 disabled={currentIndex === 0}>◀</Button>
               <div className="text-center text-sm font-medium border rounded px-3 py-1.5">
                 {currentIndex + 1} / {totalRows}
               </div>
-              <Button variant="outline" size="sm" onClick={() => navigate(1)}
+              <Button variant="destructive" className="gap-2 px-5" onClick={() => navigate(1)}
                 disabled={currentIndex >= totalRows - 1}>▶</Button>
-              <Button variant="outline" size="sm" onClick={() => setCurrentIndex(totalRows - 1)}
+              <Button variant="destructive" className="gap-2 px-5" onClick={() => setCurrentIndex(totalRows - 1)}
                 disabled={currentIndex >= totalRows - 1}>▶▶</Button>
             </div>
             <div className="text-[10px] text-muted-foreground text-center">
@@ -1322,7 +1419,7 @@ export default function AbstractScreenerPage() {
             <div className="flex items-center gap-3 flex-wrap">
               <div className="text-sm">
                 <span className="font-medium">Session: </span>
-                <code className="text-blue-600 dark:text-blue-400 text-xs bg-blue-50 dark:bg-blue-950/30 px-1.5 py-0.5 rounded">
+                <code className="text-red-600 dark:text-red-400 text-xs bg-red-50 dark:bg-red-950/30 px-1.5 py-0.5 rounded">
                   {sessionName || dataName || "untitled"}
                 </code>
                 <span className="text-muted-foreground ml-2 text-xs">
@@ -1376,7 +1473,7 @@ export default function AbstractScreenerPage() {
                         <div className="flex gap-1.5">
                           <Button size="sm" variant="outline" className="h-7" onClick={() => loadSession(s)}>Load</Button>
                           <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                            onClick={() => { deleteStoredSession(s.name); setSessions(listSessions()); }}>
+                            onClick={() => setPendingDeleteSession(s.name)}>
                             <Trash2 className="h-3 w-3" />
                           </Button>
                         </div>
@@ -1389,67 +1486,90 @@ export default function AbstractScreenerPage() {
 
             {/* ── Progress bar ─────────────────────────────────────────── */}
             <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
-              <div className="bg-blue-500 h-full transition-all duration-500"
+              <div className="bg-red-500 h-full transition-all duration-500"
                 style={{ width: `${totalRows > 0 ? (decidedCount / totalRows) * 100 : 0}%` }} />
             </div>
 
             {/* Table panel */}
-            {showTable && (
-              <div className="border rounded-xl overflow-hidden">
-                <div className="px-4 py-3 border-b font-medium text-sm flex items-center gap-2 flex-wrap">
-                  <span>Records</span>
-                  <div className="flex gap-1 flex-wrap">
-                    {(["all", "include", "exclude", "maybe", "undecided"] as const).map((f) => (
-                      <button key={f} onClick={() => setTableFilter(f)}
-                        className={cn("px-2 py-0.5 rounded text-xs border",
-                          tableFilter === f
-                            ? "bg-foreground text-background border-foreground"
-                            : "border-muted-foreground/30 text-muted-foreground hover:border-foreground/50"
+            {showTable && (() => {
+              const pageSize = 10;
+              const totalTablePages = Math.ceil(tableRows.length / pageSize);
+              const pageRows = tableRows.slice(tablePage * pageSize, (tablePage + 1) * pageSize);
+              return (
+                <div className="border rounded-xl overflow-hidden">
+                  <div className="px-4 py-3 border-b font-medium text-sm flex items-center gap-2 flex-wrap">
+                    <span>Records</span>
+                    <div className="flex gap-1 flex-wrap">
+                      {(["all", "include", "exclude", "maybe", "undecided"] as const).map((f) => (
+                        <button key={f} onClick={() => { setTableFilter(f); setTablePage(0); }}
+                          className={cn("px-2 py-0.5 rounded text-xs border",
+                            tableFilter === f
+                              ? "bg-foreground text-background border-foreground"
+                              : "border-muted-foreground/30 text-muted-foreground hover:border-foreground/50"
+                          )}>
+                          {f.charAt(0).toUpperCase() + f.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="ml-auto text-xs text-muted-foreground">{tableRows.length} rows</span>
+                  </div>
+                  <div className="divide-y">
+                    {pageRows.map(({ i, title, decision, aiDecision, aiProbs }) => (
+                      <button key={i} onClick={() => { setCurrentIndex(i); setShowTable(false); }}
+                        className={cn(
+                          "w-full text-left px-4 py-2.5 hover:bg-muted/30 transition-colors flex items-center gap-3",
+                          i === currentIndex && "bg-muted/50"
                         )}>
-                        {f.charAt(0).toUpperCase() + f.slice(1)}
+                        <span className="text-xs text-muted-foreground w-8 shrink-0">{i + 1}</span>
+                        <span className="text-sm flex-1 truncate">{title}</span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {aiDecision && aiProbs && (
+                            <span className={cn("text-[10px] px-1.5 py-0.5 rounded border",
+                              aiDecision === "include"
+                                ? "border-green-300 text-green-600 dark:border-green-800 dark:text-green-400"
+                                : aiDecision === "maybe"
+                                ? "border-amber-300 text-amber-600 dark:border-amber-800 dark:text-amber-400"
+                                : "border-red-300 text-red-600 dark:border-red-800 dark:text-red-400"
+                            )}>
+                              {(["include", "maybe", "exclude"] as const)
+                                .filter((d) => (aiProbs?.[d] ?? 0) > 0)
+                                .map((d) => `${d.charAt(0).toUpperCase() + d.slice(1)} ${Math.round((aiProbs?.[d] ?? 0) * 100)}%`)
+                                .join(", ")}
+                            </span>
+                          )}
+                          {decision ? (
+                            <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium",
+                              decision === "include" ? "bg-green-500 text-white" :
+                              decision === "maybe"   ? "bg-amber-500 text-white" : "bg-red-500 text-white"
+                            )}>{decision}</span>
+                          ) : (
+                            <span className="text-[10px] text-muted-foreground">—</span>
+                          )}
+                        </div>
                       </button>
                     ))}
                   </div>
-                  <span className="ml-auto text-xs text-muted-foreground">{tableRows.length} rows</span>
-                </div>
-                <div className="max-h-72 overflow-y-auto divide-y">
-                  {tableRows.map(({ i, title, decision, aiDecision, aiProbs }) => (
-                    <button key={i} onClick={() => { setCurrentIndex(i); setShowTable(false); }}
-                      className={cn(
-                        "w-full text-left px-4 py-2.5 hover:bg-muted/30 transition-colors flex items-center gap-3",
-                        i === currentIndex && "bg-muted/50"
-                      )}>
-                      <span className="text-xs text-muted-foreground w-8 shrink-0">{i + 1}</span>
-                      <span className="text-sm flex-1 truncate">{title}</span>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {aiDecision && aiProbs && (
-                          <span className={cn("text-[10px] px-1.5 py-0.5 rounded border",
-                            aiDecision === "include"
-                              ? "border-green-300 text-green-600 dark:border-green-800 dark:text-green-400"
-                              : aiDecision === "maybe"
-                              ? "border-amber-300 text-amber-600 dark:border-amber-800 dark:text-amber-400"
-                              : "border-red-300 text-red-600 dark:border-red-800 dark:text-red-400"
-                          )}>
-                            {(["include", "maybe", "exclude"] as const)
-                              .filter((d) => (aiProbs?.[d] ?? 0) > 0)
-                              .map((d) => `${d.charAt(0).toUpperCase() + d.slice(1)} ${Math.round((aiProbs?.[d] ?? 0) * 100)}%`)
-                              .join(", ")}
-                          </span>
-                        )}
-                        {decision ? (
-                          <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium",
-                            decision === "include" ? "bg-green-500 text-white" :
-                            decision === "maybe"   ? "bg-amber-500 text-white" : "bg-red-500 text-white"
-                          )}>{decision}</span>
-                        ) : (
-                          <span className="text-[10px] text-muted-foreground">—</span>
-                        )}
+                  {totalTablePages > 1 && (
+                    <div className="px-3 py-2 flex items-center justify-between text-xs text-muted-foreground border-t bg-muted/20">
+                      <span>{tableRows.length} rows</span>
+                      <div className="flex items-center gap-2">
+                        <span>
+                          {tablePage * pageSize + 1}&ndash;{Math.min((tablePage + 1) * pageSize, tableRows.length)} of {tableRows.length}
+                        </span>
+                        <Button variant="outline" size="sm" className="h-6 px-2"
+                          onClick={() => setTablePage((p) => Math.max(0, p - 1))} disabled={tablePage === 0}>
+                          <ChevronLeft className="h-3 w-3" />
+                        </Button>
+                        <Button variant="outline" size="sm" className="h-6 px-2"
+                          onClick={() => setTablePage((p) => Math.min(totalTablePages - 1, p + 1))} disabled={tablePage >= totalTablePages - 1}>
+                          <ChevronRight className="h-3 w-3" />
+                        </Button>
                       </div>
-                    </button>
-                  ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
           </div>
         )}
@@ -1462,7 +1582,7 @@ export default function AbstractScreenerPage() {
         <h2 className="text-2xl font-bold">6. Export Results</h2>
         <div className="flex items-center gap-3 flex-wrap">
           {/* Analytics */}
-          <Button variant="outline" size="sm" onClick={() => setShowAnalytics((v) => !v)}
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => setShowAnalytics((v) => !v)}
             disabled={decidedCount === 0 && aiCount === 0}>
             <BarChart2 className="h-3.5 w-3.5 mr-1.5" /> Analytics
           </Button>

@@ -11,7 +11,7 @@
 import { generateText } from "ai";
 import { getModel } from "./ai/providers";
 import { withRetry } from "./retry";
-import { cohenKappa, pairwiseAgreement } from "./analytics";
+import { multiWorkerKappa, pairwiseAgreement } from "./analytics";
 import { getPrompt, formatExtractionSchema } from "./prompts";
 import type { FieldDef } from "@/types";
 
@@ -190,15 +190,20 @@ export async function generateRowDirect(params: {
   rowCount: number;
   columns?: Array<{ name: string; type: string; description?: string }>;
   freeformPrompt?: string;
+  outputFormat?: string;
   temperature?: number;
   systemPrompt?: string;
-}): Promise<{ rows: Record<string, string>[]; rawCsv: string; count: number }> {
+}): Promise<{ rows: Record<string, string>[]; rawCsv: string; count: number; raw?: string }> {
+  const isFreetext = params.outputFormat === "freetext" || params.outputFormat === "markdown";
   const aiModel = getModel(params.provider, params.model, params.apiKey, params.baseUrl);
 
   let systemPrompt: string;
   let userPrompt: string;
 
-  if (params.systemPrompt) {
+  if (isFreetext) {
+    systemPrompt = params.systemPrompt || getPrompt(params.outputFormat === "markdown" ? "generate.markdown" : "generate.freetext");
+    userPrompt = params.freeformPrompt ?? "Generate realistic content.";
+  } else if (params.systemPrompt) {
     systemPrompt = params.systemPrompt;
     if (params.columns && params.columns.length > 0) {
       const colDefs = params.columns
@@ -235,6 +240,10 @@ export async function generateRowDirect(params: {
     () => generateText(genOpts),
     { maxAttempts: 3, baseDelayMs: 200 }
   );
+
+  if (isFreetext) {
+    return { rows: [], rawCsv: text, count: 0, raw: text };
+  }
 
   const cleaned = text.replace(/^```(?:json(?:l)?|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
   const expectedCols = params.columns?.map((c) => c.name);
@@ -285,6 +294,7 @@ export async function consensusRowDirect(params: {
   userContent: string;
   enableQualityScoring?: boolean;
   enableDisagreementAnalysis?: boolean;
+  includeReasoning?: boolean;
 }): Promise<ConsensusResult> {
   // Enforce direct-answer-only rules on every worker prompt
   const strictSuffix = `\n\nSTRICT OUTPUT RULES (always apply):
@@ -321,17 +331,10 @@ export async function consensusRowDirect(params: {
     );
   }
 
-  // Step 2: Inter-rater analytics
+  // Step 2: Inter-rater analytics (all workers, set-based)
   const outputs = workerResults.map((r) => r.output.trim());
   const allSame = outputs.every((o) => o === outputs[0]);
-  const consensusType = allSame ? "Full Agreement" : "Disagreement (Synthesized)";
-
-  const w1Tokens = outputs[0].split(/[,\n]+/).map((s) => s.trim()).filter(Boolean);
-  const w2Tokens = outputs[1].split(/[,\n]+/).map((s) => s.trim()).filter(Boolean);
-  const maxLen = Math.max(w1Tokens.length, w2Tokens.length);
-  const a = w1Tokens.concat(new Array(Math.max(0, maxLen - w1Tokens.length)).fill(""));
-  const b = w2Tokens.concat(new Array(Math.max(0, maxLen - w2Tokens.length)).fill(""));
-  const kappa = cohenKappa(a, b);
+  const kappa = multiWorkerKappa(outputs);
 
   const allTokenized = outputs.map((o) =>
     o.split(/[,\n]+/).map((s) => s.trim()).filter(Boolean)
@@ -342,7 +345,7 @@ export async function consensusRowDirect(params: {
   );
   const agreementMatrix = pairwiseAgreement(padded);
 
-  // Step 3: Run judge
+  // Step 3: Run judge — also classify consensus level
   const judgeModel = getModel(
     params.judge.provider,
     params.judge.model,
@@ -354,20 +357,74 @@ export async function consensusRowDirect(params: {
     .join("\n\n---\n\n");
   const combinedContent = `Original Data: ${params.userContent}\n\nWorker Responses:\n${workersFormatted}`;
 
-  const judgeStart = Date.now();
-  const { text: judgeOutput } = await withRetry(
-    () =>
-      generateText(genOpts(judgeModel, params.judgePrompt, combinedContent)),
-    { maxAttempts: 3, baseDelayMs: 100 }
-  );
-  const judgeLatency = (Date.now() - judgeStart) / 1000;
+  let judgeOutput: string;
+  let judgeLatency: number;
+  let consensusType: string;
+  let judgeReasoning: string | undefined;
+
+  const judgeDirectSuffix = `\n\nSTRICT OUTPUT RULES (always apply):
+- Output ONLY the final answer. No explanations, no reasoning, no commentary, no justifications.
+- Plain text only. No markdown, no headings, no bullet points, no code fences.
+- Do NOT explain why you chose this answer — just give the answer directly.`;
+
+  if (allSame) {
+    consensusType = "Unanimous";
+    const judgeStart = Date.now();
+    const { text } = await withRetry(
+      () => generateText(genOpts(judgeModel, params.judgePrompt + judgeDirectSuffix, combinedContent)),
+      { maxAttempts: 3, baseDelayMs: 100 }
+    );
+    judgeOutput = text;
+    judgeLatency = (Date.now() - judgeStart) / 1000;
+  } else {
+    const judgeSuffix = judgeDirectSuffix + `\n\nADDITIONAL TASK — After producing your direct answer, you MUST end your response with a consensus classification on its own line, in this exact format:
+[CONSENSUS: <level>]
+Where <level> is one of:
+- "Unanimous" — all workers conveyed the same meaning (even if worded differently)
+- "Strong Agreement" — workers mostly agree with only minor differences in detail or phrasing
+- "Partial Agreement" — workers agree on some points but differ on others
+- "Divergent" — workers gave substantially different or contradictory responses`;
+
+    const judgeStart = Date.now();
+    const { text: rawJudge } = await withRetry(
+      () => generateText(genOpts(judgeModel, params.judgePrompt + judgeSuffix, combinedContent)),
+      { maxAttempts: 3, baseDelayMs: 100 }
+    );
+    judgeLatency = (Date.now() - judgeStart) / 1000;
+
+    // Parse [CONSENSUS: ...] — tolerant of missing ], quotes, trailing whitespace
+    const consensusMatch = rawJudge.match(/\[CONSENSUS:\s*"?([^"\]\n]+)"?\]?\s*$/im);
+    if (consensusMatch) {
+      const level = consensusMatch[1].trim();
+      const valid = ["Unanimous", "Strong Agreement", "Partial Agreement", "Divergent"];
+      consensusType = valid.includes(level) ? level : "Partial Agreement";
+      judgeOutput = rawJudge.slice(0, consensusMatch.index).trim();
+    } else {
+      consensusType = "Partial Agreement";
+      judgeOutput = rawJudge.trim();
+    }
+  }
   // Step 4 (optional): Quality scoring
   let qualityScores: number[] | undefined;
   if (params.enableQualityScoring) {
     try {
       const { text: qsText } = await withRetry(
         () =>
-          generateText(genOpts(judgeModel, `You are a quality assessor. Rate each worker response on a scale of 1-10 for accuracy and completeness. Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is 1-10.`, `Original Data: ${params.userContent}\n\nWorker Responses:\n${workersFormatted}`)),
+          generateText(genOpts(judgeModel, `You are a quality assessor evaluating worker responses. Rate each worker on a scale of 1-10.
+
+SCORING CRITERIA:
+- Accuracy (does the response correctly address the original data?)
+- Completeness (does it cover all relevant aspects?)
+- Relevance (does it stay focused on the task?)
+- Alignment with best answer (how close is it to the chosen judge output?)
+
+RULES:
+- If all workers gave the same answer, they should all receive the same score.
+- A response that matches the judge's chosen answer closely should score higher.
+- Deduct points for: factual errors, missing key information, off-topic content, unnecessary additions.
+- Be consistent: similar quality responses should get similar scores.
+
+Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is 1-10. No other text.`, `Original Data: ${params.userContent}\n\nWorker Responses:\n${workersFormatted}\n\nJudge's Chosen Answer:\n${judgeOutput}\n\nConsensus Level: ${consensusType}`)),
         { maxAttempts: 2, baseDelayMs: 100 }
       );
       const clean = qsText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
@@ -376,17 +433,33 @@ export async function consensusRowDirect(params: {
     } catch { /* non-fatal */ }
   }
 
-  // Step 5 (optional): Disagreement analysis
+  // Step 5 (optional): Judge reasoning — separate call for reliability
+  if (params.includeReasoning && consensusType !== "Unanimous") {
+    try {
+      const { text: jrText } = await withRetry(
+        () =>
+          generateText(genOpts(judgeModel, `You are a judge explaining your decision. Given the original data, the worker responses, and your chosen best answer, explain in one or two sentences why you chose this answer over the alternatives. Return ONLY the explanation, no labels or prefixes.`, `Original Data: ${params.userContent}\n\nWorker Responses:\n${workersFormatted}\n\nChosen Answer:\n${judgeOutput}`)),
+        { maxAttempts: 2, baseDelayMs: 100 }
+      );
+      judgeReasoning = jrText.trim() || "Could not generate reasoning";
+    } catch {
+      judgeReasoning = "Could not generate reasoning";
+    }
+  }
+
+  // Step 6 (optional): Disagreement analysis
   let disagreementReason: string | undefined;
-  if (params.enableDisagreementAnalysis && consensusType !== "Full Agreement") {
+  if (params.enableDisagreementAnalysis && consensusType !== "Unanimous") {
     try {
       const { text: drText } = await withRetry(
         () =>
           generateText(genOpts(judgeModel, `You are an expert analyst. In exactly one sentence, explain why the workers disagreed.`, `Original Data: ${params.userContent}\n\nWorker Responses:\n${workersFormatted}`)),
         { maxAttempts: 2, baseDelayMs: 100 }
       );
-      disagreementReason = drText.trim();
-    } catch { /* non-fatal */ }
+      disagreementReason = drText.trim() || "Could not analyze disagreement";
+    } catch {
+      disagreementReason = "Could not analyze disagreement";
+    }
   }
 
   return {
@@ -397,12 +470,13 @@ export async function consensusRowDirect(params: {
     kappa: isNaN(kappa) ? null : kappa,
     kappaLabel: isNaN(kappa)
       ? "N/A"
-      : kappa < 0.2 ? "Poor"
-      : kappa < 0.4 ? "Fair"
+      : kappa < 0.2 ? "Very Low"
+      : kappa < 0.4 ? "Low"
       : kappa < 0.6 ? "Moderate"
-      : kappa < 0.8 ? "Substantial"
-      : "Almost Perfect",
+      : kappa < 0.8 ? "High"
+      : "Very High",
     agreementMatrix,
+    ...(judgeReasoning !== undefined ? { judgeReasoning } : {}),
     ...(qualityScores !== undefined ? { qualityScores } : {}),
     ...(disagreementReason !== undefined ? { disagreementReason } : {}),
   };
@@ -439,21 +513,54 @@ export async function automatorRowDirect(params: {
       Object.assign(inputData, cumulativeData);
     }
 
+    const expectedFields = step.output_fields.map((f) => f.name);
     const schemaHint = step.output_fields
-      .map((f) => `- ${f.name} (${f.type}): ${f.constraints ?? "no constraints"}`)
-      .join("\n");
-    const systemPrompt = `TASK: ${step.task}\n\nOUTPUT SCHEMA (JSON):\n${schemaHint}\n\nIMPORTANT: Return a valid JSON object. Do not include any other text.`;
+      .map((f) => `"${f.name}": <${f.type}>${f.constraints ? ` (${f.constraints})` : ""}`)
+      .join(",\n  ");
+    const systemPrompt = `TASK: ${step.task}
+
+Return a JSON object with EXACTLY these keys — no other keys, no renaming, no translation:
+{
+  ${schemaHint}
+}
+
+RULES:
+- Use the EXACT field names shown above (in English, as-is) — never translate or rename keys
+- The keys in the input data are field identifiers, NOT content — do not translate or transform them
+- Apply the task ONLY to the values, not the keys
+- Each value must be a plain ${step.output_fields.length === 1 ? step.output_fields[0].type : "string or number"} — never a nested object
+- Do not wrap values in objects like {"text": "..."} — return the value directly
+- No markdown, no code fences, no explanation — return ONLY the JSON object`;
 
     const { text } = await withRetry(
       () =>
-        generateText(genOpts(aiModel, systemPrompt, `Input Data: ${JSON.stringify(inputData)}`)),
+        generateText(genOpts(aiModel, systemPrompt, `Input Data (keys are field identifiers — do NOT translate them):\n${JSON.stringify(inputData)}`)),
       { maxAttempts: 3, baseDelayMs: 100 }
     );
 
     const parsedOutput = extractJson(text);
     if (parsedOutput) {
-      cumulativeData = { ...cumulativeData, ...parsedOutput };
-      stepResults.push({ step: step.name, output: parsedOutput, success: true });
+      const normalized: Record<string, unknown> = {};
+      for (const fieldName of expectedFields) {
+        let val = parsedOutput[fieldName];
+        if (val === undefined) {
+          const lowerField = fieldName.toLowerCase();
+          const matchKey = Object.keys(parsedOutput).find(
+            (k) => k.toLowerCase() === lowerField || k.toLowerCase().replace(/[_\s]/g, "") === lowerField.replace(/[_\s]/g, "")
+          );
+          if (matchKey) val = parsedOutput[matchKey];
+        }
+        if (val !== null && val !== undefined && typeof val === "object" && !Array.isArray(val)) {
+          const entries = Object.entries(val as Record<string, unknown>);
+          val = entries.length === 1 ? entries[0][1] : JSON.stringify(val);
+        }
+        if (Array.isArray(val)) {
+          val = val.map((item) => typeof item === "object" ? JSON.stringify(item) : String(item)).join(", ");
+        }
+        if (val !== undefined) normalized[fieldName] = val;
+      }
+      cumulativeData = { ...cumulativeData, ...normalized };
+      stepResults.push({ step: step.name, output: normalized, success: true });
     } else {
       stepResults.push({ step: step.name, raw: text, success: false, error: "Failed to parse JSON" });
     }
@@ -578,4 +685,36 @@ export async function documentAnalyzeDirect(params: {
   }
 
   return { fields };
+}
+
+// ── documentProcessDirect — mirrors /api/document-process ───────────────────
+
+export async function documentProcessDirect(params: {
+  file: File;
+  provider: string;
+  model: string;
+  apiKey: string;
+  baseUrl?: string;
+  systemPrompt: string;
+}): Promise<{
+  text: string;
+  fileName: string;
+  charCount: number;
+  truncated: boolean;
+}> {
+  const { extractTextBrowser } = await import("./document-browser");
+  const { text: rawText, truncated, charCount } = await extractTextBrowser(params.file);
+
+  if (!rawText.trim()) {
+    throw new Error("Document appears to be empty or unreadable");
+  }
+
+  const aiModel = getModel(params.provider, params.model, params.apiKey, params.baseUrl);
+
+  const { text } = await withRetry(
+    () => generateText(genOpts(aiModel, params.systemPrompt, `Document: ${params.file.name}\n\n${rawText}`, undefined, 4096)),
+    { maxAttempts: 3, baseDelayMs: 200 }
+  );
+
+  return { text, fileName: params.file.name, charCount, truncated };
 }

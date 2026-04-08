@@ -51,26 +51,62 @@ export async function POST(req: NextRequest) {
         Object.assign(inputData, cumulativeData);
       }
 
+      const expectedFields = step.output_fields.map((f) => f.name);
       const schemaHint = step.output_fields
-        .map((f) => `- ${f.name} (${f.type}): ${f.constraints ?? "no constraints"}`)
-        .join("\n");
+        .map((f) => `"${f.name}": <${f.type}>${f.constraints ? ` (${f.constraints})` : ""}`)
+        .join(",\n  ");
 
-      const systemPrompt = `TASK: ${step.task}\n\nOUTPUT SCHEMA (JSON):\n${schemaHint}\n\nIMPORTANT: Return a valid JSON object. Do not include any other text.`;
+      const systemPrompt = `TASK: ${step.task}
+
+Return a JSON object with EXACTLY these keys — no other keys, no renaming, no translation:
+{
+  ${schemaHint}
+}
+
+RULES:
+- Use the EXACT field names shown above (in English, as-is) — never translate or rename keys
+- The keys in the input data are field identifiers, NOT content — do not translate or transform them
+- Apply the task ONLY to the values, not the keys
+- Each value must be a plain ${step.output_fields.length === 1 ? step.output_fields[0].type : "string or number"} — never a nested object
+- Do not wrap values in objects like {"text": "..."} — return the value directly
+- No markdown, no code fences, no explanation — return ONLY the JSON object`;
 
       const { text } = await withRetry(
         () =>
           generateText({
             model: aiModel,
             system: systemPrompt,
-            prompt: `Input Data: ${JSON.stringify(inputData)}`,
+            prompt: `Input Data (keys are field identifiers — do NOT translate them):\n${JSON.stringify(inputData)}`,
           }),
         { maxAttempts: 3, baseDelayMs: 100 }
       );
 
       const parsedOutput = extractJson(text);
       if (parsedOutput) {
-        cumulativeData = { ...cumulativeData, ...parsedOutput };
-        stepResults.push({ step: step.name, output: parsedOutput, success: true });
+        // Normalize: keep only expected fields, unwrap nested single-key objects, coerce types
+        const normalized: Record<string, unknown> = {};
+        for (const fieldName of expectedFields) {
+          let val = parsedOutput[fieldName];
+          // If exact key not found, try case-insensitive or partial match
+          if (val === undefined) {
+            const lowerField = fieldName.toLowerCase();
+            const matchKey = Object.keys(parsedOutput).find(
+              (k) => k.toLowerCase() === lowerField || k.toLowerCase().replace(/[_\s]/g, "") === lowerField.replace(/[_\s]/g, "")
+            );
+            if (matchKey) val = parsedOutput[matchKey];
+          }
+          // Unwrap nested single-key objects like {"text": "actual value"}
+          if (val !== null && val !== undefined && typeof val === "object" && !Array.isArray(val)) {
+            const entries = Object.entries(val as Record<string, unknown>);
+            val = entries.length === 1 ? entries[0][1] : JSON.stringify(val);
+          }
+          if (Array.isArray(val)) {
+            val = val.map((item) => typeof item === "object" ? JSON.stringify(item) : String(item)).join(", ");
+          }
+          if (val !== undefined) normalized[fieldName] = val;
+        }
+        cumulativeData = { ...cumulativeData, ...normalized };
+        stepResults.push({ step: step.name, output: normalized, success: true });
       } else {
         stepResults.push({ step: step.name, raw: text, success: false, error: "Failed to parse JSON" });
       }

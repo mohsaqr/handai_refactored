@@ -70,12 +70,47 @@ export function exactMatchRate(a: string[], b: string[]): number {
  */
 export function interpretKappa(k: number): string {
   if (isNaN(k)) return "N/A";
-  if (k < 0) return "Poor (< 0)";
-  if (k < 0.2) return "Slight (0–0.20)";
-  if (k < 0.4) return "Fair (0.21–0.40)";
-  if (k < 0.6) return "Moderate (0.41–0.60)";
-  if (k < 0.8) return "Substantial (0.61–0.80)";
-  return "Almost Perfect (0.81–1.00)";
+  if (k < 0.2) return "Very Low (0–0.19)";
+  if (k < 0.4) return "Low (0.20–0.39)";
+  if (k < 0.6) return "Moderate (0.40–0.59)";
+  if (k < 0.8) return "High (0.60–0.79)";
+  return "Very High (0.80–1.00)";
+}
+
+/**
+ * Average pairwise agreement across all workers using set-based Jaccard similarity.
+ *
+ * Each worker output is tokenized into a set of codes (split by comma/newline).
+ * For free-form text, the entire output is treated as a single token.
+ * Agreement = |intersection| / |union| (Jaccard index), averaged across all pairs.
+ * Returns a value in [0, 1]: 0 = no overlap, 1 = identical sets.
+ */
+export function multiWorkerKappa(workerOutputs: string[]): number {
+  if (workerOutputs.length < 2) return NaN;
+
+  // Tokenize each worker's output into a normalized set
+  const workerSets = workerOutputs.map((output) => {
+    const tokens = output.split(/[,\n]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+    return new Set(tokens.length > 0 ? tokens : [output.trim().toLowerCase()]);
+  });
+
+  // Average pairwise Jaccard similarity
+  const pairScores: number[] = [];
+  for (let i = 0; i < workerSets.length; i++) {
+    for (let j = i + 1; j < workerSets.length; j++) {
+      const setA = workerSets[i];
+      const setB = workerSets[j];
+      let intersection = 0;
+      for (const code of setA) {
+        if (setB.has(code)) intersection++;
+      }
+      const union = new Set([...setA, ...setB]).size;
+      pairScores.push(union === 0 ? 1 : intersection / union);
+    }
+  }
+
+  if (pairScores.length === 0) return NaN;
+  return pairScores.reduce((sum, s) => sum + s, 0) / pairScores.length;
 }
 
 // ── AI Coder IRA utilities ──────────────────────────────────────────

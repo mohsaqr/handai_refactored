@@ -8,7 +8,7 @@ import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useAppStore } from "@/lib/store";
 import { useSystemSettings } from "@/lib/hooks";
 import { useRestoreSession } from "@/hooks/useRestoreSession";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
 
@@ -24,6 +24,7 @@ import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection"
 import { ExecutionPanel } from "@/components/tools/ExecutionPanel";
 import { ResultsPanel } from "@/components/tools/ResultsPanel";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
+import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 
 type Row = Record<string, unknown>;
 
@@ -41,12 +42,13 @@ const SAMPLE_PROMPTS: Record<string, string> = {
 };
 
 export default function ModelComparisonPage() {
-  const [data, setData] = useState<Row[]>([]);
-  const [dataName, setDataName] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState(
+  const [data, setData] = useSessionState<Row[]>("modelcomp_data", []);
+  const [dataName, setDataName] = useSessionState("modelcomp_dataName", "");
+  const [systemPrompt, setSystemPrompt] = useSessionState(
+    "modelcomp_systemPrompt",
     "Analyze the following data and provide a concise, structured response."
   );
-  const [selectedProviders, setSelectedProviders] = useState<string[]>([]);
+  const [selectedProviders, setSelectedProviders] = useSessionState<string[]>("modelcomp_selectedProviders", []);
 
   const providers = useAppStore((state) => state.providers);
   const systemSettings = useSystemSettings();
@@ -56,7 +58,7 @@ export default function ModelComparisonPage() {
   const availableProviders = Object.values(providers).filter((p) => p.isLocal || !!p.apiKey);
 
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
-  const { selectedCols, toggleCol, toggleAll } = useColumnSelection(allColumns, false);
+  const { selectedCols, setSelectedCols, toggleCol, toggleAll } = useColumnSelection("modelcomp_selectedCols", allColumns, false);
 
   // ── Auto-generate AI Instructions ──
   const buildAutoInstructions = useCallback(() => {
@@ -189,7 +191,39 @@ export default function ModelComparisonPage() {
     queueMicrotask(() => {
       setData(restored.data);
       setDataName(restored.dataName);
-      setSystemPrompt(restored.systemPrompt);
+
+      const fullPrompt = restored.systemPrompt ?? "";
+
+      // Restore instructions
+      const instrMatch = fullPrompt.match(/INSTRUCTION:\n([\s\S]*?)(?:\n\n|$)/);
+      setSystemPrompt(instrMatch ? instrMatch[1].trim() : fullPrompt);
+
+      // Restore selected columns
+      const colsMatch = fullPrompt.match(/SELECTED COLUMNS:\n([\s\S]*?)(?:\n\n|$)/);
+      if (colsMatch) {
+        const cols = colsMatch[1].split("\n").map((l) => l.replace(/^- /, "").trim()).filter(Boolean);
+        if (cols.length > 0) setSelectedCols(cols);
+      }
+
+      // Restore selected providers from "SELECTED MODELS:" section
+      const modelsMatch = fullPrompt.match(/SELECTED MODELS:\n([\s\S]*?)(?:\n\n|$)/);
+      if (modelsMatch) {
+        const providerIds = modelsMatch[1].split("\n")
+          .map((l) => l.replace(/^- /, "").trim())
+          .filter(Boolean)
+          .map((entry) => {
+            // Format is "ProviderLabel/model" — extract provider ID
+            const slashIdx = entry.indexOf("/");
+            const label = slashIdx >= 0 ? entry.slice(0, slashIdx) : entry;
+            // Convert label back to provider ID
+            const lower = label.toLowerCase().replace(/\s+/g, "");
+            if (lower === "lmstudio") return "lmstudio";
+            return lower;
+          })
+          .filter(Boolean);
+        if (providerIds.length > 0) setSelectedProviders(providerIds);
+      }
+
       // Populate results in global processing store
       const errors = restored.results.filter((r) => r.status === "error").length;
       useProcessingStore.getState().completeJob(
@@ -225,12 +259,13 @@ export default function ModelComparisonPage() {
           <p className="text-muted-foreground text-sm">Compare outputs from multiple LLMs side-by-side on your dataset</p>
         </div>
         {data.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setSelectedProviders([]); batch.clearResults(); }}>
-            Start Over
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("modelcomp_"); setData([]); setDataName(""); setSelectedProviders([]); setSystemPrompt("Analyze the following data and provide a concise, structured response."); setConcurrency(systemSettings.maxConcurrency); setAiInstructions(""); batch.clearResults(); }}>
+            <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
         )}
       </div>
 
+      <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Data */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
@@ -346,6 +381,8 @@ export default function ModelComparisonPage() {
         </div>
       </AIInstructionsSection>
 
+      </div>
+
       <div className="border-t" />
 
       {/* ── 6. Execute */}
@@ -353,6 +390,7 @@ export default function ModelComparisonPage() {
         <h2 className="text-2xl font-bold">6. Execute</h2>
         <ExecutionPanel
           isProcessing={batch.isProcessing}
+          aborting={batch.aborting}
           runMode={batch.runMode}
           progress={batch.progress}
           etaStr={batch.etaStr}
@@ -361,7 +399,9 @@ export default function ModelComparisonPage() {
           onRun={batch.run}
           onAbort={batch.abort}
           onResume={batch.resume}
+          onCancel={batch.clearResults}
           failedCount={batch.failedCount}
+          skippedCount={batch.skippedCount}
           fullLabel={`Full Run (${data.length} rows)`}
         />
       </div>

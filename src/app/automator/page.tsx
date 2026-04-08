@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
 import { useBatchProcessor } from "@/hooks/useBatchProcessor";
 import { useRestoreSession } from "@/hooks/useRestoreSession";
+import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 import { useActiveModel, useSystemSettings } from "@/lib/hooks";
@@ -23,8 +24,10 @@ import {
 import {
   Plus,
   X,
+  Trash2,
   ArrowRight,
   Settings2,
+  RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -58,10 +61,10 @@ function makeStep(idx: number): Step {
 }
 
 export default function AutomatorPage() {
-  const [data, setData] = useState<Row[]>([]);
-  const [dataName, setDataName] = useState("");
-  const [availableCols, setAvailableCols] = useState<string[]>([]);
-  const [steps, setSteps] = useState<Step[]>([makeStep(1)]);
+  const [data, setData] = useSessionState<Row[]>("automator_data", []);
+  const [dataName, setDataName] = useSessionState("automator_dataName", "");
+  const [availableCols, setAvailableCols] = useSessionState<string[]>("automator_availableCols", []);
+  const [steps, setSteps] = useState<Step[]>([makeStep(1), makeStep(2)]);
   const [isMounted, setIsMounted] = useState(false);
 
   const provider = useActiveModel();
@@ -147,7 +150,7 @@ export default function AutomatorPage() {
       lines.push(`Step ${idx + 1}: ${step.name}`);
       if (step.task) lines.push(`  Task: ${step.task}`);
       if (step.input_fields.length > 0) lines.push(`  Input: ${step.input_fields.join(", ")}`);
-      if (step.output_fields.length > 0) lines.push(`  Output: ${step.output_fields.map(f => f.name).join(", ")}`);
+      if (step.output_fields.length > 0) lines.push(`  Output: ${step.output_fields.map(f => `${f.name}(${f.type})`).join(", ")}`);
     });
     lines.push("");
     lines.push("RULES:");
@@ -194,16 +197,33 @@ export default function AutomatorPage() {
             await new Promise(r => setTimeout(r, 500 * attempt));
             continue;
           }
+          // Unwrap nested objects to avoid "[object Object]" or '{"text":"..."}' in table cells
+          const flatOutput: Row = {};
+          for (const [k, v] of Object.entries(result.output)) {
+            if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+              // LLM sometimes wraps value in {"text":"..."} or {"number":...} — unwrap single-key objects
+              const entries = Object.entries(v as Record<string, unknown>);
+              if (entries.length === 1) {
+                flatOutput[k] = typeof entries[0][1] === "object" ? JSON.stringify(entries[0][1]) : entries[0][1];
+              } else {
+                flatOutput[k] = JSON.stringify(v);
+              }
+            } else if (Array.isArray(v)) {
+              flatOutput[k] = v.map((item) => typeof item === "object" ? JSON.stringify(item) : String(item)).join(", ");
+            } else {
+              flatOutput[k] = v;
+            }
+          }
           if (newKeys.length === 0 && steps.length > 0) {
             return {
               ...row,
-              ...result.output,
+              ...flatOutput,
               _step_warning: "No new fields extracted — check step configuration",
               status: "warning",
               latency_ms: Date.now() - t0,
             };
           }
-          return { ...result.output, status: "success", latency_ms: Date.now() - t0 };
+          return { ...flatOutput, status: "success", latency_ms: Date.now() - t0 };
         } catch (err) {
           if (attempt === MAX_ROW_RETRIES) {
             return {
@@ -219,14 +239,31 @@ export default function AutomatorPage() {
       }
       return { ...row, status: "error", error_msg: "Retry limit reached", latency_ms: Date.now() - t0 };
     },
-    buildResultEntry: (r: Row, i: number) => ({
-      rowIndex: i,
-      input: r as Record<string, unknown>,
-      output: r as Record<string, unknown>,
-      status: (r.status as string) ?? "success",
-      latency: r.latency_ms as number | undefined,
-      errorMessage: r.error_msg as string | undefined,
-    }),
+    buildResultEntry: (r: Row, i: number) => {
+      // Separate original input fields from pipeline output fields
+      const outputFieldNames = new Set(
+        steps.flatMap((s) => s.output_fields.map((f) => f.name))
+      );
+      const metaKeys = new Set(["status", "latency_ms", "error_msg", "automator_error", "_step_warning"]);
+      const input: Record<string, unknown> = {};
+      const output: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(r)) {
+        if (metaKeys.has(k)) continue;
+        if (outputFieldNames.has(k)) {
+          output[k] = v;
+        } else {
+          input[k] = v;
+        }
+      }
+      return {
+        rowIndex: i,
+        input,
+        output: Object.keys(output).length > 0 ? output : (r.status === "error" ? "" : JSON.stringify(r)),
+        status: (r.status as string) ?? "success",
+        latency: r.latency_ms as number | undefined,
+        errorMessage: r.error_msg as string | undefined,
+      };
+    },
   });
 
   // ── Session restore from history ───────────────────────────────────────────
@@ -234,9 +271,56 @@ export default function AutomatorPage() {
   useEffect(() => {
     if (!restored) return;
     queueMicrotask(() => {
-      setData(restored.data);
+      const fullPrompt = restored.systemPrompt ?? "";
+
+      // Restore pipeline steps from "PIPELINE STEPS:" section
+      const restoredSteps: Step[] = [];
+      const stepsMatch = fullPrompt.match(/PIPELINE STEPS:\n([\s\S]*?)(?:\n\nRULES:|$)/);
+      if (stepsMatch) {
+        const stepBlocks = stepsMatch[1].trim().split(/(?=Step \d+:)/);
+        for (const block of stepBlocks) {
+          const nameMatch = block.match(/^Step \d+:\s*(.+)/);
+          if (!nameMatch) continue;
+          const taskMatch = block.match(/Task:\s*(.+)/);
+          const inputMatch = block.match(/Input:\s*(.+)/);
+          const outputMatch = block.match(/Output:\s*(.+)/);
+          restoredSteps.push({
+            id: crypto.randomUUID(),
+            name: nameMatch[1].trim(),
+            task: taskMatch ? taskMatch[1].trim() : "",
+            input_fields: inputMatch ? inputMatch[1].split(",").map((f) => f.trim()).filter(Boolean) : [],
+            output_fields: outputMatch
+              ? outputMatch[1].split(",").map((f) => {
+                  const m = f.trim().match(/^(.+?)\((\w+)\)$/);
+                  return m
+                    ? { name: m[1].trim(), type: m[2], constraints: "" }
+                    : { name: f.trim(), type: "text", constraints: "" };
+                }).filter((f) => f.name)
+              : [{ name: "", type: "text", constraints: "" }],
+          });
+        }
+        if (restoredSteps.length > 0) {
+          setSteps(restoredSteps);
+          localStorage.setItem(STEPS_KEY, JSON.stringify(restoredSteps));
+        }
+      }
+
+      // Strip pipeline output fields and meta fields from data to get clean input
+      const outputFieldNames = new Set(
+        restoredSteps.flatMap((s) => s.output_fields.map((f) => f.name))
+      );
+      const metaKeys = new Set(["status", "latency_ms", "error_msg", "automator_error", "_step_warning", "output"]);
+      const cleanData = restored.data.map((row) => {
+        const clean: Row = {};
+        for (const [k, v] of Object.entries(row)) {
+          if (!outputFieldNames.has(k) && !metaKeys.has(k)) clean[k] = v;
+        }
+        return clean;
+      });
+      setData(cleanData);
       setDataName(restored.dataName);
-      if (restored.data.length > 0) setAvailableCols(Object.keys(restored.data[0]));
+      if (cleanData.length > 0) setAvailableCols(Object.keys(cleanData[0]));
+
       // Populate results in global processing store
       const errors = restored.results.filter((r) => r.status === "error").length;
       useProcessingStore.getState().completeJob(
@@ -259,12 +343,13 @@ export default function AutomatorPage() {
           <p className="text-muted-foreground text-sm">Create and run multi-step AI data pipelines</p>
         </div>
         {data.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setAvailableCols([]); batch.clearResults(); }}>
-            Start Over
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("automator_"); setData([]); setDataName(""); setAvailableCols([]); setSteps([makeStep(1), makeStep(2)]); localStorage.removeItem(STEPS_KEY); setAiInstructions(""); batch.clearResults(); }}>
+            <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
         )}
       </div>
 
+      <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
@@ -325,13 +410,13 @@ export default function AutomatorPage() {
                   onChange={(e) => updateStep(step.id, { name: e.target.value })}
                 />
                 <Button
-                  variant="ghost"
+                  variant="outline"
                   size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
+                  className="h-7 w-7 text-destructive border-destructive/30 hover:bg-destructive hover:text-destructive-foreground shrink-0"
                   onClick={() => removeStep(step.id)}
                   disabled={steps.length === 1}
                 >
-                  <X className="h-4 w-4" />
+                  <Trash2 className="h-3.5 w-3.5" />
                 </Button>
               </div>
               <div className="p-4 space-y-4">
@@ -402,11 +487,10 @@ export default function AutomatorPage() {
                           >
                             <option value="text">Text</option>
                             <option value="number">Number</option>
-                            <option value="list">List</option>
                           </select>
                           {step.output_fields.length > 1 && (
                             <button
-                              className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive transition-opacity"
+                              className="text-muted-foreground hover:text-destructive"
                               onClick={() => removeFieldFromStep(step.id, fieldIdx)}
                             >
                               <X className="h-3 w-3" />
@@ -440,6 +524,8 @@ export default function AutomatorPage() {
         onChange={setAiInstructions}
       />
 
+      </div>
+
       <div className="border-t" />
 
       {/* ── 4. Execute ────────────────────────────────────────────────────── */}
@@ -448,6 +534,7 @@ export default function AutomatorPage() {
         <NoModelWarning activeModel={provider} />
         <ExecutionPanel
           isProcessing={batch.isProcessing}
+          aborting={batch.aborting}
           runMode={batch.runMode}
           progress={batch.progress}
           etaStr={batch.etaStr}
@@ -456,8 +543,9 @@ export default function AutomatorPage() {
           onRun={batch.run}
           onAbort={batch.abort}
           onResume={batch.resume}
+          onCancel={batch.clearResults}
           failedCount={batch.failedCount}
-          progressColor="bg-indigo-500"
+          skippedCount={batch.skippedCount}
           fullLabel={`Full Run (${data.length} rows)`}
         />
       </div>

@@ -14,10 +14,11 @@ import { useProcessingFlag } from "@/hooks/useProcessingFlag";
 import { useRestoreSession } from "@/hooks/useRestoreSession";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 import { useColumnSelection } from "@/hooks/useColumnSelection";
+import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { getPrompt } from "@/lib/prompts";
 import { SAMPLE_DATASETS } from "@/lib/sample-data";
-import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
-import { Loader2, CheckCircle2, X } from "lucide-react";
+import { ResultsPanel } from "@/components/tools/ResultsPanel";
+import { Loader2, CheckCircle2, X, RotateCcw, Plus } from "lucide-react";
 import { toast } from "sonner";
 import type { Row } from "@/types";
 import { dispatchProcessRow, dispatchCreateRun, dispatchSaveResults } from "@/lib/llm-dispatch";
@@ -45,6 +46,11 @@ interface RawTheme {
   examples: string[];
 }
 
+interface ConsolidatedTheme {
+  code: string;
+  description: string;
+}
+
 interface CodeEntry {
   code: string;
   description: string;
@@ -67,22 +73,25 @@ function cleanCodeName(raw: string): string {
 
 export default function CodebookGeneratorPage() {
   const { markProcessing, markIdle } = useProcessingFlag("/codebook-generator");
-  const [data, setData] = useState<Row[]>([]);
-  const [dataName, setDataName] = useState("");
-  const [codebookDescription, setCodebookDescription] = useState("");
-  const [stage, setStage] = useState<Stage>("idle");
-  const [codebookStructured, setCodebookStructured] = useState<CodeEntry[]>([]);
+  const [data, setData] = useSessionState<Row[]>("codebookgen_data", []);
+  const [dataName, setDataName] = useSessionState("codebookgen_dataName", "");
+  const [codebookDescription, setCodebookDescription] = useSessionState("codebookgen_description", "");
+  const [stage, setStage] = useSessionState<Stage>("codebookgen_stage", "idle");
+  const [codebookStructured, setCodebookStructured] = useSessionState<CodeEntry[]>("codebookgen_structured", []);
 
   // Phase A / B split state
-  const [discoveryThemes, setDiscoveryThemes] = useState<RawTheme[]>([]);
-  const [discoveryRaw, setDiscoveryRaw] = useState("");
-  const [awaitingReview, setAwaitingReview] = useState(false);
+  const [discoveryThemes, setDiscoveryThemes] = useSessionState<RawTheme[]>("codebookgen_themes", []);
+  const [discoveryRaw, setDiscoveryRaw] = useSessionState("codebookgen_raw", "");
+  const [awaitingReview, setAwaitingReview] = useSessionState("codebookgen_awaitingReview", false);
+  const [awaitingReview2, setAwaitingReview2] = useSessionState("codebookgen_awaitingReview2", false);
+  const [consolidatedThemes, setConsolidatedThemes] = useSessionState<ConsolidatedTheme[]>("codebookgen_consolidatedThemes", []);
+  const [lastRunId, setLastRunId] = useSessionState<string | null>("codebookgen_runId", null);
 
   const providerConfig = useActiveModel();
   const systemSettings = useSystemSettings();
 
   const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
-  const { selectedCols, toggleCol, toggleAll } = useColumnSelection(allColumns, false);
+  const { selectedCols, toggleCol, toggleAll } = useColumnSelection("codebookgen_selectedCols", allColumns, false);
 
   // ── Session restore from history ───────────────────────────────────────────
   const restored = useRestoreSession("codebook-generator");
@@ -147,6 +156,8 @@ export default function CodebookGeneratorPage() {
     setDiscoveryThemes([]);
     setDiscoveryRaw("");
     setAwaitingReview(false);
+    setAwaitingReview2(false);
+    setConsolidatedThemes([]);
     toast.success(`Loaded ${loaded.length} rows`);
   };
 
@@ -213,32 +224,56 @@ export default function CodebookGeneratorPage() {
     }
   };
 
-  // Phase B: run Stages 2 + 3 with (possibly edited) themes
-  const confirmAndContinue = async () => {
+  // Phase B: run Stage 2 (consolidation) only, then pause for Review 2
+  const confirmReview1 = async () => {
     if (!providerConfig) return toast.error("No enabled provider configured. Check Settings.");
 
     setAwaitingReview(false);
     const themesJson = JSON.stringify(discoveryThemes);
 
     try {
-      // Stage 2: Consolidation
       setStage("consolidation");
       const consolidationOutput = await callLLM(
         getPrompt("codebook.consolidation"),
         `Consolidate these raw themes:\n\n${themesJson}`
       );
 
-      // Stage 3: Definition — ask for 3-field format
+      try {
+        const parsed = JSON.parse(cleanJson(consolidationOutput)) as Record<string, unknown>[];
+        const consolidated: ConsolidatedTheme[] = parsed.map((r) => ({
+          code: cleanCodeName(String(r.theme ?? r.code ?? r.name ?? "")),
+          description: String(r.description ?? r.definition ?? ""),
+        }));
+        setConsolidatedThemes(consolidated);
+      } catch {
+        setConsolidatedThemes([]);
+      }
+
+      setStage("idle");
+      setAwaitingReview2(true);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error("Stage 2 failed", { description: msg });
+      setStage("idle");
+    }
+  };
+
+  // Phase C: run Stage 3 (definition) with (possibly edited) consolidated themes
+  const confirmReview2 = async () => {
+    if (!providerConfig) return toast.error("No enabled provider configured. Check Settings.");
+
+    setAwaitingReview2(false);
+
+    try {
       setStage("definition");
       const definitionOutput = await callLLM(
         `You are a qualitative researcher creating a formal codebook. Return a JSON array of objects, each with exactly these keys: "code" (short label), "description" (clear definition), "example" (a representative example from the data). Do not include any other keys. Do not include markdown or code fences.`,
-        `Create formal definitions for these consolidated themes:\n\n${consolidationOutput}`
+        `Create formal definitions for these consolidated themes:\n\n${JSON.stringify(consolidatedThemes)}`
       );
 
       let structured: CodeEntry[] = [];
       try {
         const parsed = JSON.parse(cleanJson(definitionOutput));
-        // Normalize to CodeEntry shape (handle legacy formats)
         structured = (parsed as Record<string, unknown>[]).map((e) => ({
           code: cleanCodeName(String(e.code ?? e.theme ?? "")),
           description: String(e.description ?? e.definition ?? ""),
@@ -265,6 +300,7 @@ export default function CodebookGeneratorPage() {
           inputRows: data.length,
         });
         if (runId) {
+          setLastRunId(runId);
           const resultRows = structured.map((entry, i) => ({
             rowIndex: i,
             input: { stage: "codebook" } as Record<string, unknown>,
@@ -283,10 +319,17 @@ export default function CodebookGeneratorPage() {
     }
   };
 
+  const goBackToReview1 = () => {
+    setAwaitingReview2(false);
+    setAwaitingReview(true);
+  };
+
   const restart = () => {
     setAwaitingReview(false);
+    setAwaitingReview2(false);
     setDiscoveryThemes([]);
     setDiscoveryRaw("");
+    setConsolidatedThemes([]);
     setStage("idle");
   };
 
@@ -309,8 +352,8 @@ export default function CodebookGeneratorPage() {
           <p className="text-muted-foreground text-sm">3-stage AI pipeline: Discovery &rarr; Consolidation &rarr; Definition</p>
         </div>
         {data.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => { setData([]); setDataName(""); setCodebookStructured([]); setStage("idle"); setDiscoveryThemes([]); setDiscoveryRaw(""); setAwaitingReview(false); }}>
-            Start Over
+          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("codebookgen_"); setData([]); setDataName(""); setCodebookStructured([]); setStage("idle"); setDiscoveryThemes([]); setDiscoveryRaw(""); setAwaitingReview(false); setAwaitingReview2(false); setConsolidatedThemes([]); setLastRunId(null); setCodebookDescription(""); setAiInstructions(""); }}>
+            <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
         )}
       </div>
@@ -376,12 +419,24 @@ export default function CodebookGeneratorPage() {
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">4. Execute</h2>
 
+        <NoModelWarning activeModel={providerConfig} />
+
+        {!awaitingReview && !awaitingReview2 && (
+          <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white w-full"
+            disabled={data.length === 0 || isProcessing || !providerConfig}
+            onClick={() => generatePhaseA()}>
+            {isProcessing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+            Full Run ({Math.min(data.length, 100)} rows)
+          </Button>
+        )}
+
         {/* Stage progress tracker */}
-        {stage !== "idle" && (
+        {(stage !== "idle" || awaitingReview || awaitingReview2) && (
           <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/30 border">
             {stageOrder.map((s, i) => {
               const currentIdx = stageOrder.indexOf(stage as Stage);
-              const isDone = currentIdx > i || stage === "done";
+              const completedUpTo = awaitingReview2 ? 1 : awaitingReview ? 0 : -1;
+              const isDone = currentIdx > i || stage === "done" || i <= completedUpTo;
               const isActive = stage === s;
               return (
                 <React.Fragment key={s}>
@@ -402,17 +457,6 @@ export default function CodebookGeneratorPage() {
           </div>
         )}
 
-        <NoModelWarning activeModel={providerConfig} />
-
-        {!awaitingReview && (
-          <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white w-full"
-            disabled={data.length === 0 || isProcessing || !providerConfig || awaitingReview}
-            onClick={() => generatePhaseA()}>
-            {isProcessing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
-            Run ({Math.min(data.length, 100)} rows)
-          </Button>
-        )}
-
         {isProcessing && (
           <p className="text-xs text-muted-foreground text-center">{STAGE_LABELS[stage]}</p>
         )}
@@ -421,16 +465,11 @@ export default function CodebookGeneratorPage() {
       {/* ── Review Discovered Themes (Phase A result) ────────────────────── */}
       {awaitingReview && (
         <div className="space-y-4 border-t pt-6 pb-8">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Review Discovered Themes</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Stage 1 found {discoveryThemes.length} themes. Remove or rename before consolidation.
-              </p>
-            </div>
-            <Button variant="ghost" size="sm" onClick={restart} className="text-muted-foreground">
-              <X className="h-4 w-4 mr-1.5" /> Restart
-            </Button>
+          <div>
+            <h2 className="text-lg font-semibold">Review Discovered Themes</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Stage 1 found {discoveryThemes.length} themes. Add, remove, or rename before consolidation.
+            </p>
           </div>
 
           {discoveryRaw ? (
@@ -441,19 +480,26 @@ export default function CodebookGeneratorPage() {
           ) : (
             <div className="space-y-2">
               {discoveryThemes.map((t, idx) => (
-                <div key={idx} className="flex items-start gap-2 p-3 border rounded-lg bg-muted/5">
-                  <div className="flex-1 space-y-1">
-                    <Input
-                      value={t.theme}
-                      onChange={(e) =>
-                        setDiscoveryThemes((prev) =>
-                          prev.map((th, i) => i === idx ? { ...th, theme: e.target.value } : th)
-                        )
-                      }
-                      className="h-7 text-sm font-medium"
-                    />
-                    <p className="text-[11px] text-muted-foreground pl-1">{t.description}</p>
-                  </div>
+                <div key={idx} className="flex items-center gap-2 p-3 border rounded-lg bg-muted/5">
+                  <Input
+                    value={t.theme}
+                    onChange={(e) =>
+                      setDiscoveryThemes((prev) =>
+                        prev.map((th, i) => i === idx ? { ...th, theme: e.target.value } : th)
+                      )
+                    }
+                    className="h-7 text-sm font-medium w-[30%] shrink-0"
+                  />
+                  <Input
+                    value={t.description}
+                    onChange={(e) =>
+                      setDiscoveryThemes((prev) =>
+                        prev.map((th, i) => i === idx ? { ...th, description: e.target.value } : th)
+                      )
+                    }
+                    className="h-7 text-sm text-muted-foreground flex-1"
+                    placeholder="Description"
+                  />
                   <button
                     onClick={() => setDiscoveryThemes((prev) => prev.filter((_, i) => i !== idx))}
                     className="text-muted-foreground hover:text-destructive mt-1 shrink-0"
@@ -462,6 +508,14 @@ export default function CodebookGeneratorPage() {
                   </button>
                 </div>
               ))}
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() => setDiscoveryThemes((prev) => [...prev, { theme: "", description: "", examples: [] }])}
+              >
+                <Plus className="h-4 w-4 mr-1.5" /> Add Theme
+              </Button>
             </div>
           )}
 
@@ -469,7 +523,7 @@ export default function CodebookGeneratorPage() {
             <Button
               size="lg"
               className="h-10 bg-red-500 hover:bg-red-600 text-white"
-              onClick={confirmAndContinue}
+              onClick={confirmReview1}
               disabled={discoveryThemes.length === 0 && !discoveryRaw}
             >
               {isProcessing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
@@ -482,21 +536,85 @@ export default function CodebookGeneratorPage() {
         </div>
       )}
 
-      {/* ── Results ────────────────────────────────────────────────────────── */}
-      {codebookRows.length > 0 && (
+      {/* ── Review Consolidated Codes (after Stage 2) ──────────────────────── */}
+      {awaitingReview2 && (
         <div className="space-y-4 border-t pt-6 pb-8">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Results</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {codebookRows.length} codes generated
-              </p>
-            </div>
-            <ExportDropdown data={codebookRows} filename="codebook" />
+          <div>
+            <h2 className="text-lg font-semibold">Review Consolidated Codes</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Stage 2 produced {consolidatedThemes.length} codes. Edit, add, or remove before finalizing the codebook.
+            </p>
           </div>
 
-          <DataTable data={codebookRows} />
+          <div className="space-y-2">
+            {consolidatedThemes.map((t, idx) => (
+              <div key={idx} className="flex items-center gap-2 p-3 border rounded-lg bg-muted/5">
+                  <Input
+                    value={t.code}
+                    onChange={(e) =>
+                      setConsolidatedThemes((prev) =>
+                        prev.map((th, i) => i === idx ? { ...th, code: e.target.value } : th)
+                      )
+                    }
+                    className="h-7 text-sm font-medium w-[30%] shrink-0"
+                    placeholder="Code name"
+                  />
+                  <Input
+                    value={t.description}
+                    onChange={(e) =>
+                      setConsolidatedThemes((prev) =>
+                        prev.map((th, i) => i === idx ? { ...th, description: e.target.value } : th)
+                      )
+                    }
+                    className="h-7 text-sm text-muted-foreground flex-1"
+                    placeholder="Short description"
+                  />
+                <button
+                  onClick={() => setConsolidatedThemes((prev) => prev.filter((_, i) => i !== idx))}
+                  className="text-muted-foreground hover:text-destructive mt-1 shrink-0"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            ))}
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={() => setConsolidatedThemes((prev) => [...prev, { code: "", description: "" }])}
+            >
+              <Plus className="h-4 w-4 mr-1.5" /> Add Code
+            </Button>
+          </div>
+
+          <div className="flex gap-3">
+            <Button
+              size="lg"
+              className="h-10 bg-red-500 hover:bg-red-600 text-white"
+              onClick={confirmReview2}
+              disabled={consolidatedThemes.length === 0}
+            >
+              {isProcessing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+              Confirm &amp; Finalize →
+            </Button>
+            <Button variant="outline" size="lg" className="h-10" onClick={goBackToReview1}>
+              ← Back to Themes
+            </Button>
+            <Button variant="outline" size="lg" className="h-10" onClick={restart}>
+              Restart
+            </Button>
+          </div>
         </div>
+      )}
+
+      {/* ── Results ────────────────────────────────────────────────────────── */}
+      {codebookRows.length > 0 && (
+        <ResultsPanel
+          results={codebookRows}
+          runId={lastRunId}
+          title="Results"
+          subtitle={`${codebookRows.length} codes generated`}
+        />
       )}
     </div>
   );

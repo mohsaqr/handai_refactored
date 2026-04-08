@@ -58,7 +58,7 @@ export function UploadPreview({
 
       {data.length > 0 && (
         <>
-          <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-green-50 dark:bg-green-950/20 border border-green-200 text-sm text-green-700 dark:text-green-300">
+          <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-green-50 dark:bg-green-950/20 border border-green-200 text-sm text-green-700 dark:text-green-300 flex-wrap">
             <CheckCircle2 className="h-4 w-4 shrink-0" />
             <span>
               <strong>{data.length} rows</strong> loaded from{" "}
@@ -66,11 +66,13 @@ export function UploadPreview({
             </span>
             {bannerExtra}
           </div>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-muted-foreground">Data Preview</span>
-            <ExportDropdown data={data} filename="preview" />
+          <div className="border rounded-lg overflow-hidden">
+            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between flex-wrap gap-2">
+              <span>Data Preview — {data.length} rows</span>
+              <ExportDropdown data={data} filename="preview" />
+            </div>
+            <DataTable data={data} />
           </div>
-          <DataTable data={data} />
         </>
       )}
     </div>
