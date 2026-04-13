@@ -1,6 +1,10 @@
 "use client";
 
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
+import { useDropzone } from "react-dropzone";
+import { useFilesRef, useFileStatuses, fileKey } from "@/hooks/useFilesRef";
+import type { FileState } from "@/types";
+import Papa from "papaparse";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -11,10 +15,9 @@ import { useSystemSettings } from "@/lib/hooks";
 import { useBatchProcessor } from "@/hooks/useBatchProcessor";
 import { useRestoreSession } from "@/hooks/useRestoreSession";
 import { useProcessingStore } from "@/lib/processing-store";
-import { Plus, X, RotateCcw, ChevronDown, ChevronRight, Shield } from "lucide-react";
+import { Plus, X, RotateCcw, ChevronDown, ChevronRight, Shield, Upload, FileText, Loader2, CheckCircle2, AlertCircle, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { dispatchAgentsRow } from "@/lib/llm-dispatch";
-import { SmartFileUpload, type FileStatus } from "@/components/tools/SmartFileUpload";
 import { SAMPLE_DATASETS, sampleAsFile } from "@/lib/sample-data";
 import { parseStructuredFile } from "@/lib/parse-file";
 import { extractTextBrowser } from "@/lib/document-browser";
@@ -26,7 +29,6 @@ import { ResultsPanel } from "@/components/tools/ResultsPanel";
 import { getPrompt } from "@/lib/prompts";
 
 type Row = Record<string, unknown>;
-type DataMode = "structured" | "unstructured";
 
 // ── Agent config types ───────────────────────────────────────────────────────
 
@@ -37,7 +39,6 @@ interface AgentConfig {
   role: string;
   providerId: string;
   model: string;
-  selectedColumns: string[];
   isReferee: boolean;
 }
 
@@ -70,16 +71,12 @@ function AgentCard({
   onRemove,
   canRemove,
   enabledProviders,
-  allColumns,
-  isStructured,
 }: {
   agent: AgentConfig;
   onUpdate: (a: AgentConfig) => void;
   onRemove: () => void;
   canRemove: boolean;
   enabledProviders: { providerId: string; defaultModel: string; isEnabled: boolean; apiKey?: string; baseUrl?: string; isLocal?: boolean }[];
-  allColumns: string[];
-  isStructured: boolean;
 }) {
   const [showPrompt, setShowPrompt] = useState(false);
 
@@ -91,18 +88,6 @@ function AgentCard({
 
   const handleRefereeToggle = () => {
     onUpdate({ ...agent, isReferee: !agent.isReferee });
-  };
-
-  const toggleColumn = (col: string) => {
-    const cols = agent.selectedColumns.includes(col)
-      ? agent.selectedColumns.filter((c) => c !== col)
-      : [...agent.selectedColumns, col];
-    onUpdate({ ...agent, selectedColumns: cols });
-  };
-
-  const toggleAllColumns = () => {
-    const allSelected = allColumns.every((c) => agent.selectedColumns.includes(c));
-    onUpdate({ ...agent, selectedColumns: allSelected ? [] : [...allColumns] });
   };
 
   return (
@@ -197,30 +182,6 @@ function AgentCard({
         )}
       </div>
 
-      {/* Per-agent column selection (structured only, non-referee) */}
-      {isStructured && !agent.isReferee && allColumns.length > 0 && (
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <Label className="text-xs text-muted-foreground">Columns this agent sees</Label>
-            <button onClick={toggleAllColumns} className="text-xs text-blue-600 hover:underline">
-              {allColumns.every((c) => agent.selectedColumns.includes(c)) ? "Deselect all" : "Select all"}
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {allColumns.map((col) => (
-              <label key={col} className="flex items-center gap-1 text-xs cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={agent.selectedColumns.includes(col)}
-                  onChange={() => toggleColumn(col)}
-                  className="accent-primary w-3 h-3"
-                />
-                <span className="truncate max-w-[120px]">{col}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -271,47 +232,47 @@ export default function AIAgentsPage() {
   const secondModel = enabledProviders[1]?.defaultModel ?? firstModel;
 
   // ── State ────────────────────────────────────────────────────────────────
-  const [data, setData] = useSessionState<Row[]>("aiagents_data", []);
-  const [dataName, setDataName] = useSessionState("aiagents_dataName", "");
-  const [dataMode, setDataMode] = useSessionState<DataMode>("aiagents_dataMode", "structured");
-  const [currentFile, setCurrentFile] = useState<File | null>(null);
+  const [fileStates, setFileStates] = useSessionState<FileState[]>("aiagents_fileStates", []);
+  const filesRef = useFilesRef();
   const [maxRounds, setMaxRounds] = useSessionState("aiagents_maxRounds", 3);
 
+  // File objects can't survive a reload; drop persisted entries whose files are gone.
+  useEffect(() => {
+    setFileStates((prev) => {
+      if (prev.length === 0) return prev;
+      const valid = prev.filter((fs) => filesRef.current.has(fileKey(fs.file)));
+      return valid.length === prev.length ? prev : valid;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const makeDefaultAgents = useCallback((): AgentConfig[] => [
-    { id: makeId(), name: "Analyst", rolePreset: "domain_expert", role: getPrompt("agents.domain_expert"), providerId: firstId, model: firstModel, selectedColumns: [], isReferee: false },
-    { id: makeId(), name: "Critic", rolePreset: "critic", role: getPrompt("agents.critic"), providerId: secondId, model: secondModel, selectedColumns: [], isReferee: false },
-    { id: makeId(), name: "Referee", rolePreset: "referee", role: getPrompt("agents.referee"), providerId: firstId, model: firstModel, selectedColumns: [], isReferee: true },
+    { id: makeId(), name: "Analyst", rolePreset: "domain_expert", role: getPrompt("agents.domain_expert"), providerId: firstId, model: firstModel, isReferee: false },
+    { id: makeId(), name: "Critic", rolePreset: "critic", role: getPrompt("agents.critic"), providerId: secondId, model: secondModel, isReferee: false },
+    { id: makeId(), name: "Referee", rolePreset: "referee", role: getPrompt("agents.referee"), providerId: firstId, model: firstModel, isReferee: true },
   ], [firstId, firstModel, secondId, secondModel]);
 
   const [agents, setAgents] = useSessionState<AgentConfig[]>("aiagents_agents", []);
 
-  // Initialize default agents after hydration
-  const initRef = useRef(false);
+  // Initialize default agents on first load / after Start Over clears them
   useEffect(() => {
-    if (initRef.current) return;
-    initRef.current = true;
-    if (agents.length === 0 && enabledProviders.length > 0) {
+    if (agents.length === 0) {
       setAgents(makeDefaultAgents());
     }
-  }, [agents.length, enabledProviders.length, makeDefaultAgents, setAgents]);
+  }, [agents.length, makeDefaultAgents, setAgents]);
 
   // ── Selected log row for expanded view ──────────────────────────────────
   const [expandedLogIdx, setExpandedLogIdx] = useState<number | null>(null);
 
-  const allColumns = data.length > 0 ? Object.keys(data[0]) : [];
-
-  // Auto-select all columns for new agents when data changes
-  useEffect(() => {
-    if (dataMode !== "structured" || allColumns.length === 0) return;
-    setAgents((prev) =>
-      prev.map((a) =>
-        a.selectedColumns.length === 0 && !a.isReferee
-          ? { ...a, selectedColumns: [...allColumns] }
-          : a
-      )
-    );
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allColumns.join(","), dataMode]);
+  const data: Row[] = useMemo(
+    () => fileStates.map((fs, i) => ({
+      _fileIdx: i,
+      document_name: fs.file.name,
+      _fileKey: fileKey(fs.file),
+    })),
+    [fileStates],
+  );
+  const dataName = fileStates.map((f) => f.file.name).join(", ") || "unnamed";
 
   // ── Agent CRUD ──────────────────────────────────────────────────────────
   const updateAgent = (id: string, updated: AgentConfig) => {
@@ -336,7 +297,6 @@ export default function AIAgentsPage() {
         role: "",
         providerId: firstId,
         model: firstModel,
-        selectedColumns: dataMode === "structured" ? [...allColumns] : [],
         isReferee: false,
       },
     ]);
@@ -391,7 +351,9 @@ export default function AIAgentsPage() {
     data,
     dataName,
     systemPrompt: aiInstructions,
+    selectData: (_data: Row[], mode) => (mode === "test" ? _data.slice(0, 1) : _data),
     validate: () => {
+      if (fileStates.length === 0) return "Upload at least one file";
       const nonRefs = agents.filter((a) => !a.isReferee);
       const refs = agents.filter((a) => a.isReferee);
       if (nonRefs.length < 2) return "Need at least 2 non-referee agents";
@@ -401,11 +363,6 @@ export default function AIAgentsPage() {
         if (!prov) return `Invalid provider for "${agent.name}"`;
         if (!prov.isLocal && !prov.apiKey) return `API key missing for "${agent.name}". Check Settings.`;
       }
-      if (dataMode === "structured") {
-        for (const agent of nonRefs) {
-          if (agent.selectedColumns.length === 0) return `"${agent.name}" has no columns selected`;
-        }
-      }
       return null;
     },
     runParams: {
@@ -414,6 +371,16 @@ export default function AIAgentsPage() {
       temperature: systemSettings.temperature,
     },
     processRow: async (row: Row, idx: number) => {
+      const fKey = row._fileKey as string;
+      const file = filesRef.current.get(fKey);
+      if (!file) throw new Error(`File not found: ${row.document_name}`);
+
+      const structured = await parseStructuredFile(file);
+      const userContent = structured && structured.length > 0
+        ? Papa.unparse(structured as Record<string, unknown>[])
+        : (await extractTextBrowser(file)).text;
+      if (!userContent.trim()) throw new Error("No content extracted from file");
+
       const agentConfigs = agents.map((agent) => {
         const prov = providers[agent.providerId];
         return {
@@ -423,14 +390,9 @@ export default function AIAgentsPage() {
           model: agent.model,
           apiKey: prov?.apiKey || "local",
           baseUrl: prov?.baseUrl,
-          columns: dataMode === "structured" && !agent.isReferee ? agent.selectedColumns : undefined,
           isReferee: agent.isReferee,
         };
       });
-
-      const userContent = dataMode === "unstructured"
-        ? (row.document_text as string) || JSON.stringify(row)
-        : JSON.stringify(row);
 
       const result = await dispatchAgentsRow({
         agents: agentConfigs,
@@ -445,7 +407,7 @@ export default function AIAgentsPage() {
       });
 
       return {
-        ...row,
+        document_name: file.name,
         ...agentCols,
         referee_output: result.refereeOutput,
         negotiation_log: JSON.stringify(result.negotiationLog),
@@ -468,8 +430,6 @@ export default function AIAgentsPage() {
   React.useEffect(() => {
     if (!restored) return;
     queueMicrotask(() => {
-      setData(restored.data as Row[]);
-      setDataName(restored.dataName);
       const errors = restored.results.filter((r) => r.status === "error").length;
       useProcessingStore.getState().completeJob(
         "/ai-agents",
@@ -477,89 +437,61 @@ export default function AIAgentsPage() {
         { success: restored.results.length - errors, errors, avgLatency: 0 },
         restored.runId,
       );
-      toast.success(`Restored session from "${restored.dataName}" (${restored.data.length} rows)`);
+      toast.success(`Restored session from "${restored.dataName}"`);
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restored]);
 
-  const adoptStructured = useCallback((file: File, rows: Row[]) => {
-    setCurrentFile(file);
-    setData(rows);
-    setDataName(file.name);
-    setDataMode("structured");
+  const handleDrop = useCallback((accepted: File[]) => {
+    accepted.forEach((f) => filesRef.current.set(fileKey(f), f));
+    setFileStates((prev) => [
+      ...prev,
+      ...accepted.map((f): FileState => ({ file: f, status: "pending" })),
+    ]);
     batch.clearResults();
     setExpandedLogIdx(null);
-  }, [batch, setData, setDataName, setDataMode]);
+  }, [batch, setFileStates, filesRef]);
 
-  const adoptUnstructured = useCallback((file: File, text: string) => {
-    setCurrentFile(file);
-    setData([{ document_text: text, file_name: file.name }]);
-    setDataName(file.name);
-    setDataMode("unstructured");
-    batch.clearResults();
-    setExpandedLogIdx(null);
-  }, [batch, setData, setDataName, setDataMode]);
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop: handleDrop, multiple: true });
 
-  const handleDrop = useCallback(async (accepted: File[]) => {
-    const file = accepted[0];
-    if (!file) return;
-    const rows = await parseStructuredFile(file);
-    if (rows && rows.length > 0) {
-      adoptStructured(file, rows as Row[]);
-      toast.success(`Loaded ${rows.length} rows from ${file.name}`);
-      return;
-    }
-    try {
-      const { text, charCount, truncated } = await extractTextBrowser(file);
-      if (!text.trim()) {
-        toast.error("Document appears to be empty or unreadable");
-        return;
-      }
-      adoptUnstructured(file, text);
-      toast.success(`Loaded document: ${file.name} (${charCount.toLocaleString()} chars${truncated ? ", truncated" : ""})`);
-    } catch (err) {
-      toast.error(`Failed to extract text: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }, [adoptStructured, adoptUnstructured]);
+  const removeFile = (idx: number) => {
+    const fs = fileStates[idx];
+    if (fs) filesRef.current.delete(fileKey(fs.file));
+    setFileStates((prev) => prev.filter((_, i) => i !== idx));
+  };
 
   const handleLoadSample = useCallback((key: string) => {
     const made = sampleAsFile(key);
     if (!made) return;
-    adoptStructured(made.file, made.rows as Row[]);
-    toast.success(`Loaded sample: ${SAMPLE_DATASETS[key].name}`);
-  }, [adoptStructured]);
-
-  const handleClearFile = useCallback(() => {
-    setCurrentFile(null);
-    setData([]);
-    setDataName("");
-    setDataMode("structured");
+    filesRef.current.set(fileKey(made.file), made.file);
+    setFileStates((prev) => [...prev, { file: made.file, status: "pending" }]);
     batch.clearResults();
     setExpandedLogIdx(null);
-  }, [batch, setData, setDataName, setDataMode]);
+    toast.success(`Loaded sample: ${SAMPLE_DATASETS[key].name}`);
+  }, [batch, setFileStates, filesRef]);
+
+  const handleClearAll = useCallback(() => {
+    filesRef.current.clear();
+    setFileStates([]);
+    batch.clearResults();
+    setExpandedLogIdx(null);
+    toast.success("Cleared all files");
+  }, [batch, setFileStates, filesRef]);
+
+  const fileStatuses = useFileStatuses(fileStates, batch.results);
 
   const nonReferees = agents.filter((a) => !a.isReferee);
   const callsPerRow = nonReferees.length * maxRounds + 1;
 
   const handleStartOver = () => {
     clearSessionKeys("aiagents_");
-    setCurrentFile(null);
-    setData([]);
-    setDataName("");
-    setDataMode("structured");
+    filesRef.current.clear();
+    setFileStates([]);
     setAgents(makeDefaultAgents());
     setMaxRounds(3);
     setAiInstructions("");
     setExpandedLogIdx(null);
     batch.clearResults();
   };
-
-  const resultRow = batch.results[0];
-  let fileStatus: FileStatus = "pending";
-  if (batch.isProcessing) fileStatus = "processing";
-  else if (resultRow?.status === "error") fileStatus = "error";
-  else if (resultRow?.status === "success") fileStatus = "done";
-  const fileError = resultRow?.error_msg as string | undefined;
 
   return (
     <div className="space-y-0 pb-16">
@@ -582,15 +514,92 @@ export default function AIAgentsPage() {
       {/* ── 1. Upload Data ──────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
-        <SmartFileUpload
-          file={currentFile}
-          status={fileStatus}
-          errorMessage={fileError}
-          previewRows={dataMode === "structured" ? data : null}
-          onDrop={handleDrop}
-          onClear={handleClearFile}
-          onLoadSample={handleLoadSample}
-        />
+
+        <div className="flex justify-end">
+          <Select onValueChange={handleLoadSample}>
+            <SelectTrigger className="w-[200px] h-9 text-xs">
+              <SelectValue placeholder="-- Load sample..." />
+            </SelectTrigger>
+            <SelectContent>
+              {Object.keys(SAMPLE_DATASETS).map((key) => (
+                <SelectItem key={key} value={key} className="text-xs">
+                  {SAMPLE_DATASETS[key].name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div
+          {...getRootProps()}
+          className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
+            isDragActive
+              ? "border-primary bg-primary/5"
+              : "border-muted-foreground/30 hover:border-primary/50 hover:bg-muted/20"
+          }`}
+        >
+          <input {...getInputProps()} />
+          <Upload className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">
+            {isDragActive ? "Drop files here..." : "Drop files here or click to browse"}
+          </p>
+          <p className="text-xs text-muted-foreground/60 mt-1">
+            PDF, DOCX, Excel, TXT, MD, JSON, CSV, HTML
+          </p>
+        </div>
+
+        {fileStates.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between px-1">
+              <span className="text-xs text-muted-foreground">{fileStates.length} file{fileStates.length !== 1 ? "s" : ""}</span>
+              <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground" onClick={handleClearAll}>
+                <Trash2 className="h-3 w-3 mr-1" /> Clear All
+              </Button>
+            </div>
+            {fileStates.map((entry, idx) => {
+              const status = batch.isProcessing || batch.results.length > 0 ? fileStatuses[idx] : entry.status;
+              const resultRow = batch.results[idx];
+              const errorMsg = resultRow?.error_msg as string | undefined;
+              return (
+                <div key={idx} className="space-y-1">
+                  <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg border bg-muted/20">
+                    <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <span className="flex-1 truncate text-xs">{entry.file.name}</span>
+                    <span className="text-[10px] text-muted-foreground shrink-0">
+                      {(entry.file.size / 1024).toFixed(0)} KB
+                    </span>
+
+                    {status === "pending" && (
+                      <span className="text-[10px] text-muted-foreground shrink-0">Pending</span>
+                    )}
+                    {(status === "extracting" || status === "analyzing") && (
+                      <span className="flex items-center gap-1 text-[10px] text-purple-600 shrink-0">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Processing
+                      </span>
+                    )}
+                    {status === "done" && (
+                      <span className="flex items-center gap-1 text-[10px] text-green-600 shrink-0">
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Done
+                      </span>
+                    )}
+                    {status === "error" && (
+                      <span className="flex items-center gap-1 text-[10px] text-red-500 shrink-0" title={errorMsg}>
+                        <AlertCircle className="h-3.5 w-3.5" /> Error
+                      </span>
+                    )}
+
+                    <button onClick={() => removeFile(idx)} className="text-muted-foreground hover:text-destructive shrink-0">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  {status === "error" && errorMsg && (
+                    <div className="ml-3 text-[10px] text-red-500 leading-snug">{errorMsg}</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="border-t" />
@@ -615,9 +624,6 @@ export default function AIAgentsPage() {
               onRemove={() => removeAgent(agent.id)}
               canRemove={agents.length > 3}
               enabledProviders={enabledProviders}
-              allColumns={allColumns}
-              isStructured={dataMode === "structured"}
-
             />
           ))}
         </div>
@@ -675,14 +681,17 @@ export default function AIAgentsPage() {
           runMode={batch.runMode}
           progress={batch.progress}
           etaStr={batch.etaStr}
-          dataCount={data.length}
-          disabled={data.length === 0 || agents.length < 3}
+          dataCount={fileStates.length}
+          disabled={fileStates.length === 0 || agents.length < 3}
           onRun={batch.run}
           onAbort={batch.abort}
           onResume={batch.resume}
           onCancel={batch.clearResults}
           failedCount={batch.failedCount}
           skippedCount={batch.skippedCount}
+          unitLabel="file"
+          testLabel="Test (1 file)"
+          fullLabel={`Process All (${fileStates.length} files)`}
         />
       </div>
 
@@ -693,29 +702,30 @@ export default function AIAgentsPage() {
         title="Results"
         subtitle={`${batch.results.length} rows processed`}
       >
-        {/* Expandable negotiation log for selected row */}
         {batch.results.length > 0 && (
           <div className="space-y-3">
-            <div className="text-sm font-medium">Negotiation Log</div>
             <div className="flex flex-wrap gap-1.5">
-              {batch.results.map((row, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => setExpandedLogIdx(expandedLogIdx === idx ? null : idx)}
-                  className={`px-2 py-1 text-xs rounded border transition-colors ${
-                    expandedLogIdx === idx
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "bg-muted/50 border-border hover:bg-muted"
-                  }`}
-                >
-                  Row {idx + 1}
-                </button>
-              ))}
+              {batch.results.map((row, idx) => {
+                const active = expandedLogIdx === idx;
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => setExpandedLogIdx(active ? null : idx)}
+                    className={`px-3 py-1.5 text-xs font-medium rounded border transition-colors ${
+                      active
+                        ? "bg-red-600 border-red-600 text-white"
+                        : "bg-red-500 border-red-500 text-white hover:bg-red-600"
+                    }`}
+                  >
+                    Round details{batch.results.length > 1 ? ` — ${row.document_name as string}` : ""}
+                  </button>
+                );
+              })}
             </div>
             {expandedLogIdx !== null && batch.results[expandedLogIdx] && (
               <div className="border rounded-lg p-3">
                 <div className="text-xs font-medium mb-2">
-                  Row {expandedLogIdx + 1} — {String(batch.results[expandedLogIdx].rounds_taken)} round(s), {batch.results[expandedLogIdx].converged === "yes" ? "converged" : "did not converge"}
+                  {String(batch.results[expandedLogIdx].rounds_taken)} round(s), {batch.results[expandedLogIdx].converged === "yes" ? "converged" : "did not converge"}
                 </div>
                 <NegotiationLogViewer logJson={(batch.results[expandedLogIdx].negotiation_log as string) || "[]"} />
                 <div className="mt-3 p-2 bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded">

@@ -304,6 +304,35 @@ Requirements:
 - Do not wrap output in code blocks or JSON`,
   },
 
+  "generate.gift": {
+    id: "generate.gift",
+    name: "Generate — GIFT (Moodle)",
+    category: "generate",
+    defaultValue: `You are a quiz question generator. Produce questions in Moodle GIFT format (General Import Format Technology).
+
+GIFT FORMAT RULES:
+- Each question is separated by a blank line
+- Correct answers are prefixed with =
+- Wrong answers are prefixed with ~
+- Comments use // at the start of a line
+- Question titles use ::Title:: prefix
+- Escape special characters: \\~ \\= \\# \\{ \\} \\:
+
+QUESTION TYPES YOU CAN USE:
+- Multiple choice: ::Q1:: Which is largest? {=Jupiter ~Mars ~Earth ~Venus}
+- True/False: ::Q2:: The Earth is flat. {FALSE}
+- Short answer: ::Q3:: What is the capital of France? {=Paris =paris}
+- Matching: ::Q4:: Match countries to capitals. {=France -> Paris =Germany -> Berlin =Italy -> Rome}
+- Numerical: ::Q5:: What is pi to 2 decimal places? {#3.14:0.01}
+- Essay: ::Q6:: Explain photosynthesis. {}
+
+Requirements:
+- Generate diverse, well-written questions covering the topic
+- Use a mix of question types
+- Include plausible distractors for multiple choice
+- Output ONLY valid GIFT format, no explanations or wrapper text`,
+  },
+
   // ── Automator ──────────────────────────────────────────────────────────────
   "automator.rules": {
     id: "automator.rules",
@@ -365,6 +394,70 @@ CODING APPROACH:
 
 Return ONLY a JSON array of applicable code names.
 Example: ["Positive Experience", "Social Isolation", "Flexibility"]`,
+  },
+
+  // ── AI Agents ─────────────────────────────────────────────────────────────
+  "agents.critic": {
+    id: "agents.critic",
+    name: "Agent — Critic",
+    category: "agents",
+    defaultValue: `You are a critical analyst. Challenge assumptions, identify weaknesses, and stress-test the data. Cite specific passages. Plain text only, no markdown.
+
+Instruction: `,
+  },
+
+  "agents.defender": {
+    id: "agents.defender",
+    name: "Agent — Defender",
+    category: "agents",
+    defaultValue: `You are an advocate analyst. Argue for the strongest, most charitable reading of the data, grounded in specific evidence. Plain text only, no markdown.
+
+Instruction: `,
+  },
+
+  "agents.synthesizer": {
+    id: "agents.synthesizer",
+    name: "Agent — Synthesizer",
+    category: "agents",
+    defaultValue: `You are a synthesis expert. Combine multiple perspectives into a unified, balanced view; integrate partial truths from competing interpretations. Plain text only, no markdown.
+
+Instruction: `,
+  },
+
+  "agents.domain_expert": {
+    id: "agents.domain_expert",
+    name: "Agent — Domain Expert",
+    category: "agents",
+    defaultValue: `You are a domain expert. Interpret the data through established field frameworks and terminology, flagging domain-specific nuances. Plain text only, no markdown.
+
+Instruction: `,
+  },
+
+  "agents.devils_advocate": {
+    id: "agents.devils_advocate",
+    name: "Agent — Devil's Advocate",
+    category: "agents",
+    defaultValue: `You are a devil's advocate. Deliberately argue against the prevailing interpretation with credible counter-arguments to strengthen the final answer. Plain text only, no markdown.
+
+Instruction: `,
+  },
+
+  "agents.mediator": {
+    id: "agents.mediator",
+    name: "Agent — Mediator",
+    category: "agents",
+    defaultValue: `You are a mediator. Find middle ground between competing viewpoints while prioritizing accuracy over harmony. Plain text only, no markdown.
+
+Instruction: `,
+  },
+
+  "agents.referee": {
+    id: "agents.referee",
+    name: "Agent — Referee",
+    category: "agents",
+    defaultValue: `You are the referee. Review all agents' final positions and produce a single definitive answer, evaluating disagreements against the original data. Plain text only, no markdown.
+
+Instruction: `,
   },
 
   // ── Document Processing ────────────────────────────────────────────────────
@@ -473,4 +566,14 @@ export function formatExtractionSchema(fields: FieldDef[]): string {
   );
   const header = fields.map((f) => f.name).join(",");
   return `${lines.join("\n")}\n\nCSV header: ${header}`;
+}
+
+/**
+ * Formats a FieldDef[] schema for JSON-based extraction.
+ */
+export function formatExtractionSchemaJson(fields: FieldDef[]): string {
+  const lines = fields.map(
+    (f) => `  "${f.name}": ${f.type === "number" ? "<number or null>" : "<string or null>"}${f.description ? `  // ${f.description}` : ""}`
+  );
+  return `{\n${lines.join(",\n")}\n}`;
 }

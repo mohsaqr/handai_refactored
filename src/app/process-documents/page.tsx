@@ -555,7 +555,7 @@ export default function ProcessDocumentsPage() {
           onCancel={batch.clearResults}
           failedCount={batch.failedCount}
           skippedCount={batch.skippedCount}
-          unitLabel="files"
+          unitLabel="file"
           testLabel="Test (1 file)"
           fullLabel={`Process All (${fileStates.length} file${fileStates.length !== 1 ? "s" : ""})`}
         />

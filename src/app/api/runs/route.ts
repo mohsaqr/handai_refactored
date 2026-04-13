@@ -6,10 +6,10 @@ import { RunCreateSchema } from "@/lib/validation";
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const limit = Math.min(parseInt(searchParams.get("limit") ?? "50", 10), 200);
+    const limit = Math.min(parseInt(searchParams.get("limit") ?? "50", 10), 5000);
     const offset = parseInt(searchParams.get("offset") ?? "0", 10);
 
-    const [runs, total, totalSessions, aggregate] = await Promise.all([
+    const [runs, total, totalSessions, aggregate, toolGroups, providerGroups] = await Promise.all([
       prisma.run.findMany({
         orderBy: { startedAt: "desc" },
         take: limit,
@@ -21,6 +21,8 @@ export async function GET(req: NextRequest) {
       prisma.run.aggregate({
         _sum: { successCount: true, errorCount: true },
       }),
+      prisma.run.groupBy({ by: ["runType"], _count: true }),
+      prisma.run.groupBy({ by: ["provider"], _count: true }),
     ]);
 
     const stats = {
@@ -30,7 +32,11 @@ export async function GET(req: NextRequest) {
       totalError: aggregate._sum.errorCount ?? 0,
     };
 
-    return NextResponse.json({ runs, total, limit, offset, stats });
+    const toolCounts: Record<string, number> = {};
+    for (const g of toolGroups) toolCounts[g.runType] = g._count;
+    const providers: string[] = providerGroups.map((g) => g.provider).filter(Boolean).sort();
+
+    return NextResponse.json({ runs, total, limit, offset, stats, toolCounts, providers });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     return NextResponse.json({ error: msg }, { status: 500 });

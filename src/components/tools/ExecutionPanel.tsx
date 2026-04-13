@@ -56,9 +56,10 @@ export function ExecutionPanel({
   errorCount = 0,
   testLabel,
   fullLabel,
-  unitLabel = "rows",
+  unitLabel = "row",
   children,
 }: ExecutionPanelProps) {
+  const plural = (n: number) => `${unitLabel}${n === 1 ? "" : "s"}`;
   const progressPct =
     progress.total > 0
       ? Math.round((progress.completed / progress.total) * 100)
@@ -87,7 +88,7 @@ export function ExecutionPanel({
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   {aborting
                     ? "Stopping — waiting for in-flight rows..."
-                    : `${modeLabel} — processing ${progress.total} ${unitLabel}...`}
+                    : `${modeLabel} — processing ${progress.total} ${plural(progress.total)}...`}
                   {!aborting && etaStr && (
                     <span className="text-muted-foreground ml-1">{etaStr}</span>
                   )}
@@ -129,7 +130,7 @@ export function ExecutionPanel({
                     className="h-6 px-2 text-[11px] border-green-300 text-green-700 hover:bg-green-50"
                   >
                     <Play className="h-3 w-3 mr-1" />
-                    Resume ({incompleteCount} {unitLabel})
+                    Resume ({incompleteCount} {plural(incompleteCount)})
                   </Button>
                   {onCancel && (
                     <Button
@@ -154,7 +155,7 @@ export function ExecutionPanel({
               style={{ width: `${isStopped && progress.total > 0 ? Math.round((completedOk / progress.total) * 100) : progressPct}%` }}
             />
           </div>
-          {showSuccessErrors && (
+          {showSuccessErrors && !isProcessing && (successCount > 0 || errorCount > 0) && (
             <div className="flex gap-4 text-xs">
               <span className="text-green-600">{successCount} success</span>
               <span className="text-red-500">{errorCount} errors</span>
@@ -176,7 +177,7 @@ export function ExecutionPanel({
           {isProcessing && runMode === "test" ? (
             <Loader2 className="h-4 w-4 mr-2 animate-spin" />
           ) : null}
-          {testLabel ?? `Test (${Math.min(10, dataCount)} ${unitLabel})`}
+          {testLabel ?? `Test (${Math.min(10, dataCount)} ${plural(Math.min(10, dataCount))})`}
         </Button>
         <Button
           size="lg"
@@ -187,7 +188,7 @@ export function ExecutionPanel({
           {isProcessing && runMode === "full" ? (
             <Loader2 className="h-4 w-4 mr-2 animate-spin" />
           ) : null}
-          {fullLabel ?? `Full Run (${dataCount} ${unitLabel})`}
+          {fullLabel ?? `Full Run (${dataCount} ${plural(dataCount)})`}
         </Button>
       </div>
     </div>
