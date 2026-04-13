@@ -16,8 +16,10 @@ import {
   documentExtractDirect,
   documentAnalyzeDirect,
   documentProcessDirect,
+  agentsRowDirect,
 } from "./llm-browser";
-import type { ConsensusResult } from "./llm-browser";
+import type { ConsensusResult, AgentsResult } from "./llm-browser";
+export type { AgentsResult } from "./llm-browser";
 import { createRun as idbCreateRun, saveResults as idbSaveResults } from "./db-indexeddb";
 import type { FieldDef } from "@/types";
 
@@ -211,6 +213,41 @@ export async function dispatchComparisonRow(params: {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
     });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return data;
+  }
+}
+
+// ── AI Agents row (throws on error) ─────────────────────────────────────────
+
+export async function dispatchAgentsRow(params: {
+  agents: Array<{
+    name: string;
+    role: string;
+    provider: string;
+    model: string;
+    apiKey: string;
+    baseUrl?: string;
+    columns?: string[];
+    isReferee: boolean;
+  }>;
+  userContent: string;
+  maxRounds: number;
+  rowIdx?: number;
+}): Promise<AgentsResult> {
+  if (useBrowserDirect) {
+    return await agentsRowDirect(params);
+  } else {
+    const res = await fetch("/api/ai-agents-row", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.error || `Server error ${res.status}`);
+    }
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     return data;

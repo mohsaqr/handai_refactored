@@ -12,7 +12,7 @@ import { generateText } from "ai";
 import { getModel } from "./ai/providers";
 import { withRetry } from "./retry";
 import { multiWorkerKappa, pairwiseAgreement } from "./analytics";
-import { getPrompt, formatExtractionSchema } from "./prompts";
+import { getPrompt, formatExtractionSchema, formatExtractionSchemaJson } from "./prompts";
 import type { FieldDef } from "@/types";
 
 /** Build generateText options — only includes temperature when explicitly provided (reasoning models reject it). */
@@ -29,6 +29,15 @@ export interface WorkerResult {
   id: string;
   output: string;
   latency: number;
+}
+
+export interface AgentsResult {
+  agentOutputs: Array<{ name: string; output: string; latency: number }>;
+  refereeOutput: string;
+  refereeLatency: number;
+  negotiationLog: Array<{ round: number; agent: string; output: string }>;
+  roundsTaken: number;
+  converged: boolean;
 }
 
 export interface ConsensusResult {
@@ -194,14 +203,14 @@ export async function generateRowDirect(params: {
   temperature?: number;
   systemPrompt?: string;
 }): Promise<{ rows: Record<string, string>[]; rawCsv: string; count: number; raw?: string }> {
-  const isFreetext = params.outputFormat === "freetext" || params.outputFormat === "markdown";
+  const isFreetext = params.outputFormat === "freetext" || params.outputFormat === "markdown" || params.outputFormat === "gift";
   const aiModel = getModel(params.provider, params.model, params.apiKey, params.baseUrl);
 
   let systemPrompt: string;
   let userPrompt: string;
 
   if (isFreetext) {
-    systemPrompt = params.systemPrompt || getPrompt(params.outputFormat === "markdown" ? "generate.markdown" : "generate.freetext");
+    systemPrompt = params.systemPrompt || getPrompt(params.outputFormat === "markdown" ? "generate.markdown" : params.outputFormat === "gift" ? "generate.gift" : "generate.freetext");
     userPrompt = params.freeformPrompt ?? "Generate realistic content.";
   } else if (params.systemPrompt) {
     systemPrompt = params.systemPrompt;
@@ -606,10 +615,19 @@ export async function documentExtractDirect(params: {
   // Build effective prompt: fields schema takes priority over custom systemPrompt
   let effectivePrompt: string;
   if (params.fields && params.fields.length > 0) {
-    effectivePrompt = getPrompt("document.extraction").replace(
-      "{schema}",
-      formatExtractionSchema(params.fields)
-    );
+    const schema = formatExtractionSchemaJson(params.fields);
+    effectivePrompt = `You are a document data extraction engine. Read the document and extract structured data.
+
+OUTPUT RULES — follow exactly:
+1. Output ONLY a JSON array of objects. Nothing else.
+2. Each object must have exactly these keys: ${params.fields.map((f) => `"${f.name}"`).join(", ")}
+3. Use this shape for each object:
+${schema}
+4. If a field cannot be found in the document, use null.
+5. If there are multiple records, return an array of objects.
+6. If there is only one record, still wrap it in an array: [{ ... }]
+
+STRICTLY FORBIDDEN: markdown, code fences, CSV, prose, explanations, or any text outside the JSON array.`;
   } else {
     effectivePrompt = params.systemPrompt ?? DEFAULT_EXTRACT_PROMPT;
   }
@@ -621,25 +639,76 @@ export async function documentExtractDirect(params: {
     { maxAttempts: 3, baseDelayMs: 200 }
   );
 
-  // Parse CSV response (primary); fall back to JSON if model ignored instructions
-  let records: Record<string, unknown>[] = parseCsv(text);
-  if (records.length === 0) {
+  // When fields are defined the prompt asks for JSON, so try JSON first.
+  // When no fields are defined the prompt asks for CSV, so try CSV first.
+  let records: Record<string, unknown>[] = [];
+  const cleaned = text.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+
+  const tryJson = (src: string): Record<string, unknown>[] => {
     try {
-      const cleaned = text.replace(/^```(?:json)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
-      const parsed = JSON.parse(cleaned);
-      records = Array.isArray(parsed) ? parsed : [parsed];
+      const parsed = JSON.parse(src);
+      return Array.isArray(parsed) ? parsed : [parsed];
     } catch {
-      records = [{ extracted_text: text }];
+      const jsonMatch = src.match(/\[[\s\S]*\]/);
+      const objMatch = !jsonMatch ? src.match(/\{[\s\S]*\}/) : null;
+      if (jsonMatch) {
+        try { const p = JSON.parse(jsonMatch[0]); return Array.isArray(p) ? p : [p]; } catch { /* fall through */ }
+      } else if (objMatch) {
+        try { return [JSON.parse(objMatch[0])]; } catch { /* fall through */ }
+      }
+      return [];
+    }
+  };
+
+  if (params.fields && params.fields.length > 0) {
+    // JSON-first path (fields defined → prompt asked for JSON)
+    records = tryJson(cleaned);
+    if (records.length === 0) records = parseCsv(text);
+    if (records.length === 0) records = [{ extracted_text: text }];
+  } else {
+    // CSV-first path (no fields → prompt asked for CSV)
+    records = parseCsv(text);
+    if (records.length === 0) records = tryJson(cleaned);
+    if (records.length === 0) {
+      const strippedLines = cleaned.split(/\r?\n/).filter((l: string) =>
+        l.trim() && !l.startsWith("Here") && !l.startsWith("The ") && !l.startsWith("Below")
+      );
+      const retryRecords = parseCsv(strippedLines.join("\n"));
+      records = retryRecords.length > 0 ? retryRecords : [{ extracted_text: text }];
     }
   }
 
-  // Normalize records: ensure every defined field.name exists (fill with empty string)
+  // Merge single-key objects into one record (LLM sometimes returns one field per object)
+  if (records.length > 1 && records.every((r: Record<string, unknown>) => Object.keys(r).length === 1)) {
+    const merged: Record<string, unknown> = {};
+    for (const r of records) Object.assign(merged, r);
+    records = [merged];
+  }
+
+  // Map LLM-returned keys to defined field names and fill missing with ""
   if (params.fields && params.fields.length > 0) {
+    const fieldNames = params.fields.map((f) => f.name);
+    const fieldNamesLower = fieldNames.map((n) => n.toLowerCase().replace(/[\s_-]+/g, ""));
+
     records = records.map((r) => {
-      const normalized: Record<string, unknown> = { ...r };
-      params.fields!.forEach((f) => {
-        if (!(f.name in normalized)) normalized[f.name] = "";
-      });
+      const normalized: Record<string, unknown> = {};
+      for (const f of fieldNames) {
+        if (f in r) normalized[f] = r[f];
+      }
+      for (const [key, value] of Object.entries(r)) {
+        if (fieldNames.includes(key)) continue;
+        const keyNorm = key.toLowerCase().replace(/[\s_-]+/g, "");
+        for (let i = 0; i < fieldNamesLower.length; i++) {
+          if (normalized[fieldNames[i]] !== undefined) continue;
+          if (keyNorm === fieldNamesLower[i] || keyNorm.endsWith(fieldNamesLower[i]) || keyNorm.includes(fieldNamesLower[i])) {
+            normalized[fieldNames[i]] = value;
+            break;
+          }
+        }
+      }
+      for (const f of fieldNames) {
+        if (normalized[f] === undefined) normalized[f] = "";
+      }
       return normalized;
     });
   }
@@ -717,4 +786,131 @@ export async function documentProcessDirect(params: {
   );
 
   return { text, fileName: params.file.name, charCount, truncated };
+}
+
+// ── agentsRowDirect — mirrors /api/ai-agents-row ─────────────────────────────
+
+export async function agentsRowDirect(params: {
+  agents: Array<{
+    name: string;
+    role: string;
+    provider: string;
+    model: string;
+    apiKey: string;
+    baseUrl?: string;
+    columns?: string[];
+    isReferee: boolean;
+  }>;
+  userContent: string;
+  maxRounds: number;
+}): Promise<AgentsResult> {
+  const nonReferees = params.agents.filter((a) => !a.isReferee);
+  const referee = params.agents.find((a) => a.isReferee);
+  if (!referee) throw new Error("No referee agent configured");
+  if (nonReferees.length < 1) throw new Error("Need at least one non-referee agent");
+
+  // Parse userContent once (may be JSON for structured data)
+  let parsedRow: Record<string, unknown> | null = null;
+  try { parsedRow = JSON.parse(params.userContent); } catch { /* unstructured text */ }
+
+  const negotiationLog: Array<{ round: number; agent: string; output: string }> = [];
+
+  // Track each agent's latest output across rounds
+  const latestOutputs: Record<string, string> = {};
+  const totalLatencies: Record<string, number> = {};
+  nonReferees.forEach((a) => { totalLatencies[a.name] = 0; });
+
+  let converged = false;
+  let roundsTaken = 0;
+
+  for (let round = 1; round <= params.maxRounds; round++) {
+    roundsTaken = round;
+    const previousOutputs = { ...latestOutputs };
+
+    // Build prompts and run all non-referee agents in parallel
+    const promises = nonReferees.map(async (agent) => {
+      const model = getModel(agent.provider, agent.model, agent.apiKey, agent.baseUrl);
+
+      // Build user content: subset by columns if structured, else full text
+      let agentContent: string;
+      if (agent.columns && agent.columns.length > 0 && parsedRow) {
+        const subset: Record<string, unknown> = {};
+        agent.columns.forEach((col) => { subset[col] = parsedRow![col]; });
+        agentContent = JSON.stringify(subset);
+      } else {
+        agentContent = params.userContent;
+      }
+
+      // For rounds 2+, append other agents' previous outputs
+      if (round > 1) {
+        const othersSection = Object.entries(previousOutputs)
+          .filter(([name]) => name !== agent.name)
+          .map(([name, output]) => `[${name}]:\n${output}`)
+          .join("\n\n");
+        agentContent += `\n\n--- Other agents' outputs from round ${round - 1} ---\n\n${othersSection}\n\n--- Refine your answer based on the above. ---`;
+      }
+
+      const start = Date.now();
+      const { text } = await withRetry(
+        () => generateText(genOpts(model, agent.role, agentContent)),
+        { maxAttempts: 3, baseDelayMs: 100 }
+      );
+      const latency = (Date.now() - start) / 1000;
+      return { name: agent.name, output: text.trim(), latency };
+    });
+
+    const settled = await Promise.allSettled(promises);
+    const results = settled
+      .filter((r): r is PromiseFulfilledResult<{ name: string; output: string; latency: number }> => r.status === "fulfilled")
+      .map((r) => r.value);
+
+    if (results.length === 0) {
+      const errors = settled
+        .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+        .map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason)));
+      throw new Error(`All agents failed in round ${round}: ${errors.join("; ")}`);
+    }
+
+    // Update outputs and log
+    for (const r of results) {
+      latestOutputs[r.name] = r.output;
+      totalLatencies[r.name] = (totalLatencies[r.name] || 0) + r.latency;
+      negotiationLog.push({ round, agent: r.name, output: r.output });
+    }
+
+    // Check convergence: all agents' outputs same as previous round
+    if (round > 1) {
+      converged = results.every((r) => previousOutputs[r.name] === r.output);
+      if (converged) break;
+    }
+  }
+
+  // Referee round: sees original data + all agents' final outputs
+  const agentsSummary = Object.entries(latestOutputs)
+    .map(([name, output]) => `[${name}]:\n${output}`)
+    .join("\n\n");
+  const refereePrompt = `Original data:\n${params.userContent}\n\n--- Agent outputs (final round) ---\n\n${agentsSummary}`;
+
+  const refereeModel = getModel(referee.provider, referee.model, referee.apiKey, referee.baseUrl);
+  const refStart = Date.now();
+  const { text: refereeText } = await withRetry(
+    () => generateText(genOpts(refereeModel, referee.role, refereePrompt)),
+    { maxAttempts: 3, baseDelayMs: 100 }
+  );
+  const refereeLatency = (Date.now() - refStart) / 1000;
+
+  const agentOutputs = nonReferees.map((a) => ({
+    name: a.name,
+    output: latestOutputs[a.name] || "",
+    latency: totalLatencies[a.name] || 0,
+  }));
+
+  return {
+    agentOutputs,
+    refereeOutput: refereeText.trim(),
+    refereeLatency,
+    negotiationLog,
+    roundsTaken,
+    converged,
+  };
 }

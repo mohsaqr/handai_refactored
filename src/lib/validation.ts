@@ -53,6 +53,26 @@ export const ComparisonRowSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
 });
 
+// ── /api/ai-agents-row ───────────────────────────────────────────────────────
+const AgentConfigSchema = z.object({
+  name: z.string().min(1),
+  role: z.string(),
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  apiKey: z.string().default(""),
+  baseUrl: z.string().optional(),
+  columns: z.array(z.string()).optional(),
+  isReferee: z.boolean(),
+});
+
+export const AgentsRowSchema = z.object({
+  agents: z.array(AgentConfigSchema).min(2),
+  userContent: z.string(),
+  maxRounds: z.number().int().min(1).max(10).default(3),
+  rowIdx: z.number().int().optional(),
+  runId: z.string().optional(),
+});
+
 // ── /api/automator-row ────────────────────────────────────────────────────────
 export const AutomatorRowSchema = z.object({
   row: z.record(z.string(), z.unknown()),
@@ -92,7 +112,7 @@ export const GenerateRowSchema = z.object({
     })
   ).optional(),
   freeformPrompt: z.string().optional(),
-  outputFormat: z.enum(["tabular", "json", "freetext", "markdown"]).optional(),
+  outputFormat: z.enum(["tabular", "json", "freetext", "markdown", "gift"]).optional(),
   temperature: z.number().min(0).max(2).optional(),
 });
 
@@ -146,7 +166,7 @@ export const DocumentProcessSchema = z.object({
 // ── /api/runs POST ────────────────────────────────────────────────────────────
 export const RunCreateSchema = z.object({
   sessionId: z.string().optional(),
-  runType: z.string().default('full'),
+  runType: z.string().default('unknown'),
   provider: z.string().default('openai'),
   model: z.string().default('unknown'),
   temperature: z.number().optional(),
