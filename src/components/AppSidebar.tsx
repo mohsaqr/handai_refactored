@@ -98,19 +98,9 @@ const data = {
             title: "Qualitative Analysis",
             items: [
                 {
-                    title: "Qualitative Coder",
-                    url: "/qualitative-coder",
-                    icon: Edit3,
-                },
-                {
                     title: "Consensus Coder",
                     url: "/consensus-coder",
                     icon: Users,
-                },
-                {
-                    title: "AI Coder",
-                    url: "/ai-coder",
-                    icon: Bot,
                 },
                 {
                     title: "Model Comparison",
@@ -118,14 +108,34 @@ const data = {
                     icon: Columns,
                 },
                 {
-                    title: "Codebook Generator",
-                    url: "/codebook-generator",
-                    icon: BookOpen,
+                    title: "AI Agents",
+                    url: "/ai-agents",
+                    icon: Users,
                 },
                 {
                     title: "Abstract Screener",
                     url: "/abstract-screener",
                     icon: FlaskConical,
+                },
+            ],
+        },
+        {
+            title: "Data Coding",
+            items: [
+                {
+                    title: "Qualitative Coder",
+                    url: "/qualitative-coder",
+                    icon: Edit3,
+                },
+                {
+                    title: "AI Coder",
+                    url: "/ai-coder",
+                    icon: Bot,
+                },
+                {
+                    title: "Codebook Generator",
+                    url: "/codebook-generator",
+                    icon: BookOpen,
                 },
             ],
         },

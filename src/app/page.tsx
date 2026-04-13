@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Bot, Database, Edit3, Users, Wand2, Columns, History, BookOpen, Sparkles, FileArchive, TableProperties, ArrowRight, MoreVertical, Printer, Video, RefreshCw, Settings, Clock } from "lucide-react";
+import { Bot, Database, Edit3, Users, Wand2, Columns, History, BookOpen, Sparkles, FileArchive, TableProperties, FlaskConical, ArrowRight, MoreVertical, Printer, Video, RefreshCw, Settings, Clock } from "lucide-react";
 import Link from "next/link";
 import {
   DropdownMenu,
@@ -13,56 +13,6 @@ import {
 import { Button } from "@/components/ui/button";
 
 const CATEGORIES = [
-  {
-    name: "Qualitative Analysis",
-    tools: [
-      {
-        title: "Qualitative Coder",
-        description: "AI-assisted qualitative coding — apply codes to each row of your dataset.",
-        icon: Edit3,
-        href: "/qualitative-coder",
-        color: "text-orange-500",
-        bg: "bg-orange-50 dark:bg-orange-950/30",
-        border: "hover:border-orange-200 dark:hover:border-orange-800",
-      },
-      {
-        title: "Consensus Coder",
-        description: "Multi-model consensus coding with inter-rater reliability (Cohen's Kappa).",
-        icon: Users,
-        href: "/consensus-coder",
-        color: "text-purple-500",
-        bg: "bg-purple-50 dark:bg-purple-950/30",
-        border: "hover:border-purple-200 dark:hover:border-purple-800",
-      },
-      {
-        title: "AI Coder",
-        description: "Interactive thematic analysis with AI-assisted suggestions and manual review.",
-        icon: Bot,
-        href: "/ai-coder",
-        color: "text-orange-400",
-        bg: "bg-orange-50 dark:bg-orange-950/30",
-        border: "hover:border-orange-200 dark:hover:border-orange-800",
-      },
-      {
-        title: "Codebook Generator",
-        description: "3-stage AI pipeline: Discovery → Consolidation → Definition.",
-        icon: BookOpen,
-        href: "/codebook-generator",
-        color: "text-emerald-500",
-        bg: "bg-emerald-50 dark:bg-emerald-950/30",
-        border: "hover:border-emerald-200 dark:hover:border-emerald-800",
-      },
-      {
-        title: "Model Comparison",
-        description: "Compare outputs from multiple LLMs side-by-side on your dataset.",
-        icon: Columns,
-        href: "/model-comparison",
-        color: "text-blue-500",
-        bg: "bg-blue-50 dark:bg-blue-950/30",
-        border: "hover:border-blue-200 dark:hover:border-blue-800",
-      },
-    ],
-  },
   {
     name: "Data Processing",
     tools: [
@@ -110,6 +60,79 @@ const CATEGORIES = [
         color: "text-violet-500",
         bg: "bg-violet-50 dark:bg-violet-950/30",
         border: "hover:border-violet-200 dark:hover:border-violet-800",
+      },
+    ],
+  },
+  {
+    name: "Qualitative Analysis",
+    tools: [
+      {
+        title: "Consensus Coder",
+        description: "Multi-model consensus coding with inter-rater reliability (Cohen's Kappa).",
+        icon: Users,
+        href: "/consensus-coder",
+        color: "text-purple-500",
+        bg: "bg-purple-50 dark:bg-purple-950/30",
+        border: "hover:border-purple-200 dark:hover:border-purple-800",
+      },
+      {
+        title: "Model Comparison",
+        description: "Compare outputs from multiple LLMs side-by-side on your dataset.",
+        icon: Columns,
+        href: "/model-comparison",
+        color: "text-blue-500",
+        bg: "bg-blue-50 dark:bg-blue-950/30",
+        border: "hover:border-blue-200 dark:hover:border-blue-800",
+      },
+      {
+        title: "AI Agents",
+        description: "Role-based multi-agent negotiation with referee synthesis.",
+        icon: Users,
+        href: "/ai-agents",
+        color: "text-purple-500",
+        bg: "bg-purple-50 dark:bg-purple-950/30",
+        border: "hover:border-purple-200 dark:hover:border-purple-800",
+      },
+      {
+        title: "Abstract Screener",
+        description: "AI-assisted abstract screening for systematic literature reviews.",
+        icon: FlaskConical,
+        href: "/abstract-screener",
+        color: "text-pink-500",
+        bg: "bg-pink-50 dark:bg-pink-950/30",
+        border: "hover:border-pink-200 dark:hover:border-pink-800",
+      },
+    ],
+  },
+  {
+    name: "Data Coding",
+    tools: [
+      {
+        title: "Qualitative Coder",
+        description: "AI-assisted qualitative coding — apply codes to each row of your dataset.",
+        icon: Edit3,
+        href: "/qualitative-coder",
+        color: "text-orange-500",
+        bg: "bg-orange-50 dark:bg-orange-950/30",
+        border: "hover:border-orange-200 dark:hover:border-orange-800",
+      },
+      {
+        title: "AI Coder",
+        description: "Interactive thematic analysis with AI-assisted suggestions and manual review.",
+        icon: Bot,
+        href: "/ai-coder",
+        color: "text-orange-400",
+        bg: "bg-orange-50 dark:bg-orange-950/30",
+        border: "hover:border-orange-200 dark:hover:border-orange-800",
+      },
+      {
+        title: "Codebook Generator",
+        description: "3-stage AI pipeline: Discovery → Consolidation → Definition.",
+        icon: BookOpen,
+        href: "/codebook-generator",
+        color: "text-emerald-500",
+        bg: "bg-emerald-50 dark:bg-emerald-950/30",
+        border: "hover:border-emerald-200 dark:hover:border-emerald-800",
       },
     ],
   },

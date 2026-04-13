@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,11 @@ import {
     Trash2,
     ChevronRight,
     RotateCcw,
+    Copy,
+    Check,
+    Pencil,
 } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -34,7 +38,7 @@ import {
     DialogHeader,
     DialogTitle,
 } from "@/components/ui/dialog";
-import { getRun as idbGetRun, deleteRun as idbDeleteRun } from "@/lib/db-indexeddb";
+import { getRun as idbGetRun, deleteRun as idbDeleteRun, renameRun as idbRenameRun } from "@/lib/db-indexeddb";
 import { useRestoreStore, type RestorePayload } from "@/lib/restore-store";
 import { useBrowserStorage } from "@/lib/llm-dispatch";
 import type { RunMeta, RunResult } from "@/types";
@@ -49,38 +53,49 @@ export default function RunDetailClient({ id }: { id: string }) {
     const [isLoading, setIsLoading] = useState(true);
     const [showDeleteDialog, setShowDeleteDialog] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
+    const [isEditing, setIsEditing] = useState(false);
+    const [editName, setEditName] = useState("");
+    const editRef = useRef<HTMLInputElement>(null);
     const setPendingRestore = useRestoreStore((s) => s.setPending);
+    const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-    const buildResultRow = (r: RunResult) => {
+    /** Turn a single RunResult into one or more display rows. */
+    const buildResultRows = (r: RunResult, runType?: string): Record<string, unknown>[] => {
         const input = JSON.parse(r.inputJson ?? "{}");
         const hasAiOutput = Object.keys(input).some((k) => k.startsWith("ai_output"));
 
-        // If output is a JSON object (e.g. automator), spread its fields instead of adding an "output" column
-        let outputFields: Record<string, unknown> = {};
-        if (!hasAiOutput && r.output) {
-            if (typeof r.output === "string") {
-                try {
-                    const parsed = JSON.parse(r.output);
-                    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-                        outputFields = parsed;
-                    } else {
-                        outputFields = { output: r.output };
-                    }
-                } catch {
-                    outputFields = { output: r.output };
-                }
-            } else if (typeof r.output === "object") {
-                outputFields = r.output as Record<string, unknown>;
-            }
-        }
-
-        return {
-            ...input,
-            ...outputFields,
+        const meta = {
             status: r.status,
             latency_ms: Math.round((r.latency ?? 0) * 1000),
             ...(r.errorMessage ? { error_message: r.errorMessage } : {}),
         };
+
+        // process-documents outputs are freeform text — never parse/spread them
+        if (runType === "process-documents") {
+            return [{ ...input, output: r.output ?? "", ...meta }];
+        }
+
+        // If output is a JSON object (e.g. automator), spread its fields instead of adding an "output" column
+        if (!hasAiOutput && r.output) {
+            if (typeof r.output === "string") {
+                try {
+                    const parsed = JSON.parse(r.output);
+                    // Array of objects (e.g. extract-data records) → one row per record
+                    if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "object") {
+                        return parsed.map((rec: Record<string, unknown>) => ({ ...input, ...rec, ...meta }));
+                    }
+                    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                        return [{ ...input, ...parsed, ...meta }];
+                    }
+                } catch {
+                    // not JSON — fall through
+                }
+            } else if (typeof r.output === "object") {
+                return [{ ...input, ...(r.output as Record<string, unknown>), ...meta }];
+            }
+        }
+
+        return [{ ...input, ...(hasAiOutput ? {} : { output: r.output }), ...meta }];
     };
 
     useEffect(() => {
@@ -92,14 +107,14 @@ export default function RunDetailClient({ id }: { id: string }) {
                     setRun(data.run);
                     const typedResults = data.results as RunResult[];
                     setRawResults(typedResults);
-                    setResults(typedResults.map(buildResultRow));
+                    setResults(typedResults.flatMap((r) => buildResultRows(r, data.run.runType)));
                 } else {
                     const res = await fetch(`/api/runs/${id}`);
                     const data = await res.json();
                     if (data.error) throw new Error(data.error);
                     setRun(data.run);
                     setRawResults(data.results);
-                    setResults(data.results.map(buildResultRow));
+                    setResults(data.results.flatMap((r: RunResult) => buildResultRows(r, data.run.runType)));
                 }
             } catch {
                 toast.error("Failed to load run details");
@@ -128,6 +143,38 @@ export default function RunDetailClient({ id }: { id: string }) {
         }
     };
 
+    const startEditing = () => {
+        setEditName(run?.inputFile ?? "");
+        setIsEditing(true);
+        setTimeout(() => editRef.current?.select(), 0);
+    };
+
+    const handleRename = async () => {
+        const trimmed = editName.trim();
+        if (!trimmed || !run || trimmed === run.inputFile) {
+            setIsEditing(false);
+            return;
+        }
+        try {
+            if (useBrowserDb) {
+                const result = await idbRenameRun(id, trimmed);
+                if (!result.ok) throw new Error("Rename failed");
+            } else {
+                const res = await fetch(`/api/runs/${id}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ inputFile: trimmed }),
+                });
+                if (!res.ok) throw new Error("Rename failed");
+            }
+            setRun({ ...run, inputFile: trimmed });
+            toast.success("Renamed");
+        } catch {
+            toast.error("Failed to rename");
+        }
+        setIsEditing(false);
+    };
+
     const handleRestore = () => {
         if (!run || rawResults.length === 0) return;
 
@@ -139,12 +186,40 @@ export default function RunDetailClient({ id }: { id: string }) {
             const input = JSON.parse(r.inputJson ?? "{}");
             const hasAiOutput = Object.keys(input).some((k) => k.startsWith("ai_output"));
 
+            // process-documents: keep output as-is, detect format from system prompt
+            if (run.runType === "process-documents") {
+                const sp = run.systemPrompt ?? "";
+                const fmt = sp.includes("Return ONLY raw CSV") ? "csv"
+                    : sp.includes("Return ONLY a JSON array") ? "json"
+                    : sp.includes("Return Markdown") ? "md"
+                    : sp.includes("Return Moodle GIFT format") ? "gift"
+                    : "txt";
+                return {
+                    ...input,
+                    output: r.output ?? "",
+                    ...(fmt === "csv" ? { _all_records: r.output ?? "" } : {}),
+                    _format: fmt,
+                    status: r.status ?? "success",
+                    latency_ms: Math.round((r.latency ?? 0) * 1000),
+                    ...(r.errorMessage ? { error_msg: r.errorMessage } : {}),
+                };
+            }
+
             let outputFields: Record<string, unknown> = {};
             if (!hasAiOutput && r.output) {
-                if (typeof r.output === "string") {
+                // Qualitative coder uses ai_code as the output column name
+                if (run.runType === "qualitative-coder") {
+                    outputFields = { ai_code: r.output };
+                // Consensus coder saves judge_output as the output
+                } else if (run.runType === "consensus-coder") {
+                    outputFields = { judge_output: r.output };
+                } else if (typeof r.output === "string") {
                     try {
                         const parsed = JSON.parse(r.output);
-                        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                        if (Array.isArray(parsed)) {
+                            // JSON array (e.g. extract-data records) — keep as _all_records
+                            outputFields = { _all_records: r.output, _record_count: parsed.length };
+                        } else if (parsed && typeof parsed === "object") {
                             outputFields = parsed;
                         } else {
                             outputFields = { ai_output: r.output };
@@ -186,7 +261,8 @@ export default function RunDetailClient({ id }: { id: string }) {
     const restorableTools = new Set([
         "transform", "qualitative-coder", "consensus-coder",
         "model-comparison", "automator", "abstract-screener",
-        "ai-coder", "codebook-generator",
+        "ai-coder", "codebook-generator", "ai-agents", "generate",
+        "extract-data", "process-documents",
     ]);
     const canRestore = run && rawResults.length > 0 && restorableTools.has(run.runType);
 
@@ -231,7 +307,30 @@ export default function RunDetailClient({ id }: { id: string }) {
                     </Button>
                     <div>
                         <div className="flex items-center gap-2">
-                            <h1 className="text-xl font-bold">{run.inputFile}</h1>
+                            {isEditing ? (
+                                <Input
+                                    ref={editRef}
+                                    value={editName}
+                                    onChange={(e) => setEditName(e.target.value)}
+                                    onBlur={handleRename}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter") handleRename();
+                                        if (e.key === "Escape") setIsEditing(false);
+                                    }}
+                                    className="h-8 text-xl font-bold w-[300px] border-none shadow-none focus-visible:ring-1 px-0"
+                                />
+                            ) : (
+                                <>
+                                    <h1 className="text-xl font-bold">{run.inputFile}</h1>
+                                    <button
+                                        onClick={startEditing}
+                                        className="text-muted-foreground hover:text-foreground transition-colors p-1 rounded hover:bg-muted"
+                                        title="Rename"
+                                    >
+                                        <Pencil className="h-3.5 w-3.5" />
+                                    </button>
+                                </>
+                            )}
                             <Badge variant="outline" className="capitalize">{run.runType}</Badge>
                         </div>
                         <p className="text-muted-foreground text-xs">Run ID: {run.id}</p>
@@ -313,14 +412,173 @@ export default function RunDetailClient({ id }: { id: string }) {
                     </CardContent>
                 </Card>
 
-                <div className="md:col-span-4 min-w-0 overflow-hidden">
-                    <div className="border rounded-lg overflow-hidden">
-                        <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between flex-wrap gap-2">
-                            <span>Processed Results — {results.length} rows</span>
-                            <ExportDropdown data={results} filename="run_results" />
-                        </div>
-                        <DataTable data={results} />
-                    </div>
+                <div className="md:col-span-4 min-w-0">
+                    {(() => {
+                        const sp = run.systemPrompt ?? "";
+
+                        // ── Helpers ──────────────────────────────────────────────
+                        const detectFormat = () => {
+                            if (sp.includes("Return ONLY raw CSV")) return { label: "CSV", ext: "csv", font: "font-mono" } as const;
+                            if (sp.includes("Return ONLY a JSON array") || sp.includes("Format: json")) return { label: "JSON", ext: "json", font: "font-mono" } as const;
+                            if (sp.includes("Return Markdown") || sp.includes("Format: Markdown")) return { label: "Markdown", ext: "md", font: "font-sans" } as const;
+                            if (sp.includes("Return Moodle GIFT format") || sp.includes("Format: Moodle GIFT")) return { label: "GIFT", ext: "gift", font: "font-sans" } as const;
+                            if (sp.includes("Format: plain readable text") || sp.includes("Return plain readable text")) return { label: "Free Text", ext: "txt", font: "font-sans" } as const;
+                            return null;
+                        };
+
+                        const fmt = detectFormat();
+
+                        const copyToClipboard = (text: string, idx: number) => {
+                            navigator.clipboard.writeText(text).then(() => {
+                                setCopiedIdx(idx);
+                                setTimeout(() => setCopiedIdx(null), 2000);
+                            });
+                        };
+
+                        const parseCsvToRows = (csvText: string): Record<string, unknown>[] => {
+                            const raw = csvText.replace(/^```(?:csv|json)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+                            const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+                            if (lines.length < 2) return [];
+                            const parseCsvRow = (line: string): string[] => {
+                                const values: string[] = [];
+                                let current = "";
+                                let inQuotes = false;
+                                for (let i = 0; i < line.length; i++) {
+                                    const ch = line[i];
+                                    if (ch === '"') {
+                                        if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+                                        else { inQuotes = !inQuotes; }
+                                    } else if (ch === "," && !inQuotes) {
+                                        values.push(current); current = "";
+                                    } else {
+                                        current += ch;
+                                    }
+                                }
+                                values.push(current);
+                                return values.map((v) => v.trim());
+                            };
+                            const headers = parseCsvRow(lines[0]);
+                            const rows: Record<string, unknown>[] = [];
+                            for (let li = 1; li < lines.length; li++) {
+                                const values = parseCsvRow(lines[li]);
+                                const row: Record<string, unknown> = {};
+                                headers.forEach((h, i) => { if (h) row[h] = values[i] ?? ""; });
+                                rows.push(row);
+                            }
+                            return rows;
+                        };
+
+                        // ── Freetext-like runs (generate or process-documents non-CSV) ──
+                        const isFreetextGenerate = run.runType === "generate" && fmt && fmt.ext !== "csv" && fmt.ext !== "json" &&
+                            rawResults.length === 1 && typeof rawResults[0].output === "string" && rawResults[0].output.length > 0;
+
+                        const isJsonGenerate = run.runType === "generate" && rawResults.length > 0 && fmt?.ext === "json";
+
+                        const isProcessDocs = run.runType === "process-documents";
+                        const isProcessDocsCsv = isProcessDocs && fmt?.ext === "csv";
+                        const isProcessDocsText = isProcessDocs && !isProcessDocsCsv;
+
+                        // ── Process-documents CSV → parse into proper table columns ──
+                        if (isProcessDocsCsv && rawResults.length > 0) {
+                            const tableRows: Record<string, unknown>[] = [];
+                            for (const r of rawResults) {
+                                if (r.status !== "success" || !r.output) continue;
+                                const input = JSON.parse(r.inputJson ?? "{}");
+                                const docName = (input.document_name as string) ?? "Document";
+                                const parsed = parseCsvToRows(r.output as string);
+                                for (const row of parsed) {
+                                    tableRows.push({ document_name: docName, ...row });
+                                }
+                            }
+                            if (tableRows.length > 0) {
+                                return (
+                                    <div>
+                                        <div className="px-4 py-2.5 border border-b-0 rounded-t-lg bg-muted/20 text-sm font-medium flex items-center justify-between flex-wrap gap-2">
+                                            <span>Processed Documents — {rawResults.filter((r) => r.status === "success").length} file{rawResults.filter((r) => r.status === "success").length !== 1 ? "s" : ""} — {tableRows.length} rows</span>
+                                            <ExportDropdown data={tableRows} filename="run_results" />
+                                        </div>
+                                        <div className="border rounded-b-lg">
+                                            <DataTable data={tableRows} />
+                                        </div>
+                                    </div>
+                                );
+                            }
+                        }
+
+                        // ── Freetext output (generate or process-documents non-CSV) ──
+                        if ((isFreetextGenerate || isJsonGenerate || isProcessDocsText) && rawResults.length > 0 && fmt) {
+                            // Build per-entry blocks from raw results
+                            const entries = rawResults
+                                .filter((r) => r.status === "success" && r.output)
+                                .map((r) => {
+                                    const input = JSON.parse(r.inputJson ?? "{}");
+                                    const name = isProcessDocs
+                                        ? ((input.document_name as string) ?? "Document")
+                                        : ((input.description as string) ?? "Generated");
+                                    return { name, output: r.output as string };
+                                });
+
+                            // For JSON generate with multiple batched results, reconstruct array
+                            let combinedRaw: string;
+                            if (isJsonGenerate && rawResults.length > 1) {
+                                const rows = rawResults
+                                    .filter((r) => r.status === "success" && r.output)
+                                    .map((r) => { try { return JSON.parse(r.output as string); } catch { return r.output; } });
+                                combinedRaw = JSON.stringify(rows, null, 2);
+                            } else if (entries.length === 1) {
+                                combinedRaw = entries[0].output;
+                            } else {
+                                combinedRaw = entries.map((e) => `=== ${e.name} ===\n\n${e.output}`).join("\n\n---\n\n");
+                            }
+
+                            const headerLabel = isProcessDocs
+                                ? `Processed Documents — ${entries.length} file${entries.length !== 1 ? "s" : ""} — ${fmt.label}`
+                                : `Generated Output — ${fmt.label}`;
+
+                            return (
+                                <div className="border rounded-lg overflow-hidden">
+                                    <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between flex-wrap gap-2">
+                                        <span>{headerLabel}</span>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => copyToClipboard(combinedRaw, -1)}
+                                                className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                                            >
+                                                {copiedIdx === -1 ? (
+                                                    <><Check className="h-3 w-3 text-green-600" /> Copied</>
+                                                ) : (
+                                                    <><Copy className="h-3 w-3" /> Copy</>
+                                                )}
+                                            </button>
+                                            <Button variant="outline" size="sm" className="text-xs" onClick={() => {
+                                                const blob = new Blob([combinedRaw], { type: "text/plain;charset=utf-8;" });
+                                                const url = URL.createObjectURL(blob);
+                                                const a = document.createElement("a"); a.href = url; a.download = `${isProcessDocs ? "processed_documents" : `generated_${run.id}`}.${fmt.ext}`; a.click();
+                                                URL.revokeObjectURL(url);
+                                            }}>
+                                                <Download className="h-3.5 w-3.5 mr-1.5" /> Download .{fmt.ext}
+                                            </Button>
+                                        </div>
+                                    </div>
+                                    <pre className={`p-4 text-sm whitespace-pre-wrap bg-muted/10 leading-relaxed ${fmt.font}`}>
+                                        {combinedRaw}
+                                    </pre>
+                                </div>
+                            );
+                        }
+
+                        return (
+                            <div>
+                                <div className="px-4 py-2.5 border border-b-0 rounded-t-lg bg-muted/20 text-sm font-medium flex items-center justify-between flex-wrap gap-2">
+                                    <span>Processed Results — {results.length} rows</span>
+                                    <ExportDropdown data={results} filename="run_results" />
+                                </div>
+                                <div className="border rounded-b-lg">
+                                    <DataTable data={results} />
+                                </div>
+                            </div>
+                        );
+                    })()}
                 </div>
             </div>
 

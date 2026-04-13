@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { UploadPreview } from "@/components/tools/UploadPreview";
 import { NoModelWarning } from "@/components/tools/NoModelWarning";
 import { ExecutionPanel } from "@/components/tools/ExecutionPanel";
@@ -56,7 +56,7 @@ function makeStep(idx: number): Step {
     name: `Step ${idx}`,
     task: "",
     input_fields: [],
-    output_fields: [{ name: "result", type: "text", constraints: "" }],
+    output_fields: [{ name: `ai_output_${idx}`, type: "text", constraints: "" }],
   };
 }
 
@@ -67,6 +67,7 @@ export default function AutomatorPage() {
   const [steps, setSteps] = useState<Step[]>([makeStep(1), makeStep(2)]);
   const [isMounted, setIsMounted] = useState(false);
 
+  const uploadRef = useRef<HTMLDivElement>(null);
   const provider = useActiveModel();
   const systemSettings = useSystemSettings();
 
@@ -96,10 +97,24 @@ export default function AutomatorPage() {
     if (ds) handleDataLoaded(ds.data as Row[], ds.name);
   };
 
-  const addStep = () => setSteps((prev) => [...prev, makeStep(prev.length + 1)]);
+  const renumberDefaults = (list: Step[]): Step[] =>
+    list.map((s, i) => (/^Step \d+$/.test(s.name) ? { ...s, name: `Step ${i + 1}` } : s));
+  const makeUniqueStep = (existing: Step[]): Step => {
+    const used = new Set(existing.flatMap((s) => s.output_fields.map((f) => f.name)));
+    let idx = existing.length + 1;
+    while (used.has(`ai_output_${idx}`)) idx++;
+    return {
+      id: Math.random().toString(36).substr(2, 9),
+      name: `Step ${existing.length + 1}`,
+      task: "",
+      input_fields: [],
+      output_fields: [{ name: `ai_output_${idx}`, type: "text", constraints: "" }],
+    };
+  };
+  const addStep = () => setSteps((prev) => [...prev, makeUniqueStep(prev)]);
   const removeStep = (id: string) => {
     if (steps.length === 1) return;
-    setSteps((prev) => prev.filter((s) => s.id !== id));
+    setSteps((prev) => renumberDefaults(prev.filter((s) => s.id !== id)));
   };
   const updateStep = (id: string, updates: Partial<Step>) =>
     setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, ...updates } : s)));
@@ -342,16 +357,14 @@ export default function AutomatorPage() {
           <h1 className="text-4xl font-bold">General Automator</h1>
           <p className="text-muted-foreground text-sm">Create and run multi-step AI data pipelines</p>
         </div>
-        {data.length > 0 && (
-          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("automator_"); setData([]); setDataName(""); setAvailableCols([]); setSteps([makeStep(1), makeStep(2)]); localStorage.removeItem(STEPS_KEY); setAiInstructions(""); batch.clearResults(); }}>
+        <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("automator_"); setData([]); setDataName(""); setAvailableCols([]); setSteps([makeStep(1), makeStep(2)]); localStorage.removeItem(STEPS_KEY); setAiInstructions(""); batch.clearResults(); }}>
             <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
-        )}
       </div>
 
       <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
-      <div className="space-y-4 pb-8">
+      <div ref={uploadRef} className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
         <UploadPreview
           data={data}

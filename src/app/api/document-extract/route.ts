@@ -3,7 +3,7 @@ import { generateText } from "ai";
 import { getModel } from "@/lib/ai/providers";
 import { withRetry } from "@/lib/retry";
 import { DocumentExtractSchema } from "@/lib/validation";
-import { getPrompt, formatExtractionSchema } from "@/lib/prompts";
+import { getPrompt, formatExtractionSchemaJson } from "@/lib/prompts";
 
 // ── Default prompt when no field schema is provided ───────────────────────────
 
@@ -177,6 +177,30 @@ function parseCsvResponse(raw: string): Record<string, unknown>[] {
   });
 }
 
+// ── JSON parser — tries direct parse, then embedded JSON extraction ──────────
+
+function tryParseJson(cleaned: string): Record<string, unknown>[] {
+  try {
+    const parsed = JSON.parse(cleaned);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    // Try to find a JSON array or object embedded in the response
+    const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
+    const objMatch = !jsonMatch ? cleaned.match(/\{[\s\S]*\}/) : null;
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return Array.isArray(parsed) ? parsed : [parsed];
+      } catch { /* fall through */ }
+    } else if (objMatch) {
+      try {
+        return [JSON.parse(objMatch[0])];
+      } catch { /* fall through */ }
+    }
+    return [];
+  }
+}
+
 // ── POST /api/document-extract ────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
@@ -205,10 +229,27 @@ export async function POST(req: NextRequest) {
     // Fields schema takes priority over custom systemPrompt
     let effectivePrompt: string;
     if (fields && fields.length > 0) {
-      effectivePrompt = getPrompt("document.extraction").replace(
-        "{schema}",
-        formatExtractionSchema(fields)
-      );
+      const schema = formatExtractionSchemaJson(fields);
+      const fieldList = fields
+        .map((f) => `- "${f.name}" (${f.type})${f.description ? ": " + f.description : ""}`)
+        .join("\n");
+      effectivePrompt = `You are a data extraction engine. Your ONLY job is to output a JSON array of records.
+
+The document may be a table, a narrative report, a summary, a prose description, or any other format. Extract whatever data matches the requested fields from ANYWHERE in the text — tables, paragraphs, sentences, bullet points, captions, headings, etc. If the document describes a single subject in prose, return one record. If it describes many subjects, return one record per subject.
+
+FIELDS TO EXTRACT (use these exact JSON keys):
+${fieldList}
+
+Each object must follow this shape:
+${schema}
+
+ABSOLUTE RULES:
+1. Your entire response MUST be a single JSON array. The first character must be "[" and the last character must be "]".
+2. No prose. No markdown. No code fences. No headings. No explanations before or after the array.
+3. Do NOT write a summary of the document — extract the actual field values.
+4. If a field value is not present in the document, use null (not an empty string, not "N/A").
+5. If the document contains NO relevant data at all, return exactly: []
+6. Always wrap records in an array, even when there is only one: [{ ... }]`;
     } else {
       effectivePrompt = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     }
@@ -226,25 +267,111 @@ export async function POST(req: NextRequest) {
       { maxAttempts: 3, baseDelayMs: 200 }
     );
 
-    // Parse CSV (primary); fall back to JSON if model ignored instructions
-    let records: Record<string, unknown>[] = parseCsvResponse(text);
-    if (records.length === 0) {
-      try {
-        const cleaned = text.replace(/^```(?:json)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
-        const parsed = JSON.parse(cleaned);
-        records = Array.isArray(parsed) ? parsed : [parsed];
-      } catch {
-        records = [{ extracted_text: text }];
+    // Reformat-retry: ask the model to convert its own prose response to JSON.
+    const reformatToJson = async (proseText: string): Promise<string> => {
+      if (!fields || fields.length === 0) return proseText;
+      const fieldList = fields
+        .map((f) => `- "${f.name}" (${f.type})${f.description ? ": " + f.description : ""}`)
+        .join("\n");
+      const reformatPrompt = `You are a JSON reformatter. You will receive text (possibly prose, markdown, or a summary) that describes data. Extract the requested fields from it and return ONLY a JSON array of records.
+
+REQUIRED FIELDS:
+${fieldList}
+
+RULES:
+1. Output MUST start with "[" and end with "]". Nothing else.
+2. No prose, no markdown, no explanations.
+3. Use null for missing values.
+4. If the text describes one subject, return [{ ... }]. If multiple, return one object per subject.`;
+      const { text: reformatted } = await withRetry(
+        () =>
+          generateText({
+            model: aiModel,
+            system: reformatPrompt,
+            prompt: proseText,
+            maxOutputTokens: 4096,
+          }),
+        { maxAttempts: 2, baseDelayMs: 200 }
+      );
+      return reformatted;
+    };
+
+    // When fields are defined the prompt asks for JSON, so try JSON first.
+    // When no fields are defined the prompt asks for CSV, so try CSV first.
+    let records: Record<string, unknown>[] = [];
+    let cleaned = text.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+
+    if (fields && fields.length > 0) {
+      // JSON-first path (fields defined → prompt asked for JSON)
+      records = tryParseJson(cleaned);
+      if (records.length === 0) records = parseCsvResponse(text);
+      if (records.length === 0) {
+        const reformatted = await reformatToJson(text);
+        cleaned = reformatted.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+        records = tryParseJson(cleaned);
+      }
+      if (records.length === 0) {
+        const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
+        return NextResponse.json({ error: `Model returned unparseable output even after a reformat retry. Try a stronger model. Preview: "${preview}${text.length > 200 ? "…" : ""}"` }, { status: 422 });
+      }
+    } else {
+      // CSV-first path (no fields → prompt asked for CSV)
+      records = parseCsvResponse(text);
+      if (records.length === 0) records = tryParseJson(cleaned);
+      if (records.length === 0) {
+        const strippedLines = cleaned.split(/\r?\n/).filter((l) =>
+          l.trim() && !l.startsWith("Here") && !l.startsWith("The ") && !l.startsWith("Below")
+        );
+        const retryRecords = parseCsvResponse(strippedLines.join("\n"));
+        records = retryRecords.length > 0 ? retryRecords : [{ extracted_text: text }];
       }
     }
 
-    // Ensure every defined field exists in every record (fill missing with "")
+    // Merge single-key objects into one record (LLM sometimes returns one field per object)
+    if (records.length > 1 && records.every((r) => Object.keys(r).length === 1)) {
+      const merged: Record<string, unknown> = {};
+      for (const r of records) Object.assign(merged, r);
+      records = [merged];
+    }
+
+    // Map LLM-returned keys to defined field names and fill missing with ""
     if (fields && fields.length > 0) {
+      const fieldNames = fields.map((f) => f.name);
+      const fieldNamesLower = fieldNames.map((n) => n.toLowerCase().replace(/[\s_-]+/g, ""));
+
       records = records.map((r) => {
-        const normalized: Record<string, unknown> = { ...r };
-        fields.forEach((f) => { if (!(f.name in normalized)) normalized[f.name] = ""; });
+        const normalized: Record<string, unknown> = {};
+        // First pass: exact matches
+        for (const f of fieldNames) {
+          if (f in r) normalized[f] = r[f];
+        }
+        // Second pass: fuzzy match remaining LLM keys to defined fields
+        for (const [key, value] of Object.entries(r)) {
+          if (fieldNames.includes(key)) continue; // already matched
+          const keyNorm = key.toLowerCase().replace(/[\s_-]+/g, "");
+          for (let i = 0; i < fieldNamesLower.length; i++) {
+            if (normalized[fieldNames[i]] !== undefined) continue; // already filled
+            if (keyNorm === fieldNamesLower[i] || keyNorm.endsWith(fieldNamesLower[i]) || keyNorm.includes(fieldNamesLower[i])) {
+              normalized[fieldNames[i]] = value;
+              break;
+            }
+          }
+        }
+        // Fill any still-missing fields with ""
+        for (const f of fieldNames) {
+          if (normalized[f] === undefined) normalized[f] = "";
+        }
         return normalized;
       });
+
+      // If every normalized field on every record is empty/null, surface as error
+      const allEmpty = records.every((r) =>
+        fieldNames.every((f) => r[f] === "" || r[f] === null || r[f] === undefined)
+      );
+      if (allEmpty) {
+        const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
+        return NextResponse.json({ error: `Model returned no usable field values. The document may lack extractable text (scanned PDF?) or the field definitions don't match its content. Preview: "${preview}${text.length > 200 ? "…" : ""}"` }, { status: 422 });
+      }
     }
 
     return NextResponse.json({ records, fileName: fileName ?? "untitled", charCount, truncated, count: records.length });

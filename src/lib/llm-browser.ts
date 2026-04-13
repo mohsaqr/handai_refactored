@@ -616,18 +616,26 @@ export async function documentExtractDirect(params: {
   let effectivePrompt: string;
   if (params.fields && params.fields.length > 0) {
     const schema = formatExtractionSchemaJson(params.fields);
-    effectivePrompt = `You are a document data extraction engine. Read the document and extract structured data.
+    const fieldList = params.fields
+      .map((f) => `- "${f.name}" (${f.type})${f.description ? ": " + f.description : ""}`)
+      .join("\n");
+    effectivePrompt = `You are a data extraction engine. Your ONLY job is to output a JSON array of records.
 
-OUTPUT RULES — follow exactly:
-1. Output ONLY a JSON array of objects. Nothing else.
-2. Each object must have exactly these keys: ${params.fields.map((f) => `"${f.name}"`).join(", ")}
-3. Use this shape for each object:
+The document may be a table, a narrative report, a summary, a prose description, or any other format. Extract whatever data matches the requested fields from ANYWHERE in the text — tables, paragraphs, sentences, bullet points, captions, headings, etc. If the document describes a single subject in prose, return one record. If it describes many subjects, return one record per subject.
+
+FIELDS TO EXTRACT (use these exact JSON keys):
+${fieldList}
+
+Each object must follow this shape:
 ${schema}
-4. If a field cannot be found in the document, use null.
-5. If there are multiple records, return an array of objects.
-6. If there is only one record, still wrap it in an array: [{ ... }]
 
-STRICTLY FORBIDDEN: markdown, code fences, CSV, prose, explanations, or any text outside the JSON array.`;
+ABSOLUTE RULES:
+1. Your entire response MUST be a single JSON array. The first character must be "[" and the last character must be "]".
+2. No prose. No markdown. No code fences. No headings. No explanations before or after the array.
+3. Do NOT write a summary of the document — extract the actual field values.
+4. If a field value is not present in the document, use null (not an empty string, not "N/A").
+5. If the document contains NO relevant data at all, return exactly: []
+6. Always wrap records in an array, even when there is only one: [{ ... }]`;
   } else {
     effectivePrompt = params.systemPrompt ?? DEFAULT_EXTRACT_PROMPT;
   }
@@ -642,7 +650,31 @@ STRICTLY FORBIDDEN: markdown, code fences, CSV, prose, explanations, or any text
   // When fields are defined the prompt asks for JSON, so try JSON first.
   // When no fields are defined the prompt asks for CSV, so try CSV first.
   let records: Record<string, unknown>[] = [];
-  const cleaned = text.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+  let cleaned = text.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+
+  // Reformat pass — if the first attempt produced prose instead of JSON, feed
+  // it back to the model and ask it to convert to the required schema.
+  const reformatToJson = async (proseText: string): Promise<string> => {
+    if (!params.fields || params.fields.length === 0) return proseText;
+    const fieldList = params.fields
+      .map((f) => `- "${f.name}" (${f.type})${f.description ? ": " + f.description : ""}`)
+      .join("\n");
+    const reformatPrompt = `You are a JSON reformatter. You will receive text (possibly prose, markdown, or a summary) that describes data. Extract the requested fields from it and return ONLY a JSON array of records.
+
+REQUIRED FIELDS:
+${fieldList}
+
+RULES:
+1. Output MUST start with "[" and end with "]". Nothing else.
+2. No prose, no markdown, no explanations.
+3. Use null for missing values.
+4. If the text describes one subject, return [{ ... }]. If multiple, return one object per subject.`;
+    const { text: reformatted } = await withRetry(
+      () => generateText(genOpts(aiModel, reformatPrompt, proseText, undefined, 4096)),
+      { maxAttempts: 2, baseDelayMs: 200 }
+    );
+    return reformatted;
+  };
 
   const tryJson = (src: string): Record<string, unknown>[] => {
     try {
@@ -664,7 +696,16 @@ STRICTLY FORBIDDEN: markdown, code fences, CSV, prose, explanations, or any text
     // JSON-first path (fields defined → prompt asked for JSON)
     records = tryJson(cleaned);
     if (records.length === 0) records = parseCsv(text);
-    if (records.length === 0) records = [{ extracted_text: text }];
+    if (records.length === 0) {
+      // Reformat-retry: the model produced prose. Feed it back and ask for JSON.
+      const reformatted = await reformatToJson(text);
+      cleaned = reformatted.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+      records = tryJson(cleaned);
+    }
+    if (records.length === 0) {
+      const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
+      throw new Error(`Model returned unparseable output even after a reformat retry. Try a stronger model. Preview: "${preview}${text.length > 200 ? "…" : ""}"`);
+    }
   } else {
     // CSV-first path (no fields → prompt asked for CSV)
     records = parseCsv(text);
@@ -711,6 +752,16 @@ STRICTLY FORBIDDEN: markdown, code fences, CSV, prose, explanations, or any text
       }
       return normalized;
     });
+
+    // If every normalized field on every record is empty/null, the extraction
+    // produced no real data — surface it as an error instead of a row of blanks.
+    const allEmpty = records.every((r) =>
+      fieldNames.every((f) => r[f] === "" || r[f] === null || r[f] === undefined)
+    );
+    if (allEmpty) {
+      const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
+      throw new Error(`Model returned no usable field values. The document may lack extractable text (scanned PDF?) or the field definitions don't match its content. Preview: "${preview}${text.length > 200 ? "…" : ""}"`);
+    }
   }
 
   return { records, fileName: params.file.name, charCount, truncated, count: records.length };

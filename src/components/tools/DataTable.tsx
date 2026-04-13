@@ -24,7 +24,7 @@ interface DataTableProps {
     maxRows?: number;
 }
 
-type ExportFormat = "csv" | "tsv" | "json" | "xlsx";
+type ExportFormat = "csv" | "json" | "xlsx" | "md";
 
 export function exportData(data: Record<string, unknown>[], format: ExportFormat, filename?: string) {
     if (format === "xlsx") {
@@ -35,7 +35,15 @@ export function exportData(data: Record<string, unknown>[], format: ExportFormat
         return;
     }
 
-    const headers = Object.keys(data[0] || {});
+    const headers: string[] = [];
+    {
+        const seen = new Set<string>();
+        for (const row of data) {
+            for (const key of Object.keys(row)) {
+                if (!seen.has(key)) { seen.add(key); headers.push(key); }
+            }
+        }
+    }
     let content: string;
     let mimeType: string;
     let ext: string;
@@ -49,15 +57,13 @@ export function exportData(data: Record<string, unknown>[], format: ExportFormat
         ].join("\n");
         mimeType = "text/csv;charset=utf-8;";
         ext = "csv";
-    } else if (format === "tsv") {
-        content = [
-            headers.join("\t"),
-            ...data.map((r) =>
-                headers.map((h) => String(r[h] ?? "").replace(/\t/g, " ")).join("\t")
-            ),
-        ].join("\n");
-        mimeType = "text/tab-separated-values;charset=utf-8;";
-        ext = "tsv";
+    } else if (format === "md") {
+        content = data.map((r, i) => {
+            const lines = headers.map((h) => `**${h}:** ${String(r[h] ?? "")}`);
+            return `### Row ${i + 1}\n\n${lines.join("\n\n")}`;
+        }).join("\n\n---\n\n");
+        mimeType = "text/markdown;charset=utf-8;";
+        ext = "md";
     } else {
         content = JSON.stringify(data, null, 2);
         mimeType = "application/json;charset=utf-8;";
@@ -94,7 +100,7 @@ export function ExportDropdown({ data, filename }: { data: Record<string, unknow
                 <>
                     <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
                     <div className="absolute right-0 top-full mt-1 z-50 border rounded-md bg-popover shadow-md py-1 min-w-[120px]">
-                        {(["csv", "tsv", "json", "xlsx"] as ExportFormat[]).map((fmt) => (
+                        {(["xlsx", "csv", "json", "md"] as ExportFormat[]).map((fmt) => (
                             <button
                                 key={fmt}
                                 className="w-full text-left px-4 py-2 text-sm hover:bg-muted transition-colors"
@@ -103,7 +109,7 @@ export function ExportDropdown({ data, filename }: { data: Record<string, unknow
                                     setShowMenu(false);
                                 }}
                             >
-                                {fmt.toUpperCase()}
+                                {fmt === "xlsx" ? "Excel" : fmt === "md" ? "Markdown" : fmt.toUpperCase()}
                             </button>
                         ))}
                     </div>
@@ -138,7 +144,15 @@ export function DataTable({ data, maxRows = 10 }: DataTableProps) {
 
     if (!data || data.length === 0) return null;
 
-    const headers = Object.keys(data[0]);
+    const headers: string[] = [];
+    {
+        const seen = new Set<string>();
+        for (const row of data) {
+            for (const key of Object.keys(row)) {
+                if (!seen.has(key)) { seen.add(key); headers.push(key); }
+            }
+        }
+    }
 
     const totalPages = Math.ceil(sortedData.length / maxRows);
     const displayData = sortedData.slice(tablePage * maxRows, (tablePage + 1) * maxRows);
