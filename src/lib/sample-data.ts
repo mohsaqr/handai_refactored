@@ -1,4 +1,5 @@
 import type { SampleDataset } from "@/types";
+import Papa from "papaparse";
 
 export const SAMPLE_DATASETS: Record<string, SampleDataset> = {
   product_reviews: {
@@ -310,3 +311,12 @@ export const SAMPLE_DATASETS: Record<string, SampleDataset> = {
     ],
   },
 };
+
+export function sampleAsFile(key: string): { file: File; rows: Record<string, unknown>[] } | null {
+  const ds = SAMPLE_DATASETS[key];
+  if (!ds) return null;
+  const rows = ds.data as Record<string, unknown>[];
+  const csv = Papa.unparse(rows);
+  const fileName = `${ds.name.replace(/\s+/g, "_").toLowerCase()}.csv`;
+  return { file: new File([csv], fileName, { type: "text/csv" }), rows };
+}

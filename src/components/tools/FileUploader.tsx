@@ -3,10 +3,8 @@
 import React, { useCallback, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { Upload, AlertCircle } from "lucide-react";
-import Papa from "papaparse";
-import * as XLSX from "xlsx";
 import { Card } from "@/components/ui/card";
-import { parseRis } from "@/lib/ris-parser";
+import { parseStructuredFile, getFileExt } from "@/lib/parse-file";
 
 interface FileUploaderProps {
     onDataLoaded: (data: Record<string, unknown>[], fileName: string) => void;
@@ -17,66 +15,26 @@ export function FileUploader({ onDataLoaded, accept }: FileUploaderProps) {
     const [isProcessing, setIsProcessing] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const onDrop = useCallback((acceptedFiles: File[]) => {
+    const onDrop = useCallback(async (acceptedFiles: File[]) => {
         const file = acceptedFiles[0];
         if (!file) return;
 
         setIsProcessing(true);
         setError(null);
 
-        const reader = new FileReader();
-
-        reader.onload = (e) => {
-            const result = e.target?.result;
-            if (!result) return;
-
-            try {
-                const fileExt = file.name.split(".").pop()?.toLowerCase();
-
-                if (fileExt === "csv") {
-                    Papa.parse<Record<string, unknown>>(result as string, {
-                        header: true,
-                        skipEmptyLines: true,
-                        complete: (results) => {
-                            onDataLoaded(results.data, file.name);
-                            setIsProcessing(false);
-                        },
-                        error: (err: Error) => {
-                            setError(`Error parsing CSV: ${err.message}`);
-                            setIsProcessing(false);
-                        },
-                    });
-                } else if (fileExt === "xlsx" || fileExt === "xls") {
-                    const workbook = XLSX.read(result, { type: "binary" });
-                    const firstSheetName = workbook.SheetNames[0];
-                    const worksheet = workbook.Sheets[firstSheetName];
-                    const data = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet);
-                    onDataLoaded(data, file.name);
-                    setIsProcessing(false);
-                } else if (fileExt === "json") {
-                    const data: unknown = JSON.parse(result as string);
-                    onDataLoaded(Array.isArray(data) ? data as Record<string, unknown>[] : [data as Record<string, unknown>], file.name);
-                    setIsProcessing(false);
-                } else if (fileExt === "ris") {
-                    const rows = parseRis(result as string);
-                    if (rows.length === 0) {
-                        setError("No valid records found in RIS file");
-                        setIsProcessing(false);
-                        return;
-                    }
-                    onDataLoaded(rows, file.name);
-                    setIsProcessing(false);
-                }
-            } catch (err: unknown) {
-                setError(`Failed to process file: ${err instanceof Error ? err.message : String(err)}`);
+        try {
+            const rows = await parseStructuredFile(file);
+            if (!rows) {
+                const ext = getFileExt(file.name);
+                setError(ext === "ris" ? "No valid records found in RIS file" : `Failed to parse .${ext} file`);
                 setIsProcessing(false);
+                return;
             }
-        };
-
-        if (file.name.endsWith(".xlsx") || file.name.endsWith(".xls")) {
-            reader.readAsBinaryString(file);
-        } else {
-            reader.readAsText(file);
+            onDataLoaded(rows, file.name);
+        } catch (err: unknown) {
+            setError(`Failed to process file: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+            setIsProcessing(false);
         }
     }, [onDataLoaded]);
 

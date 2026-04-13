@@ -1,13 +1,14 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PromptEditor } from "@/components/tools/PromptEditor";
 import { useActiveModel } from "@/lib/hooks";
-import { useProcessingFlag } from "@/hooks/useProcessingFlag";
+import { useRestoreSession } from "@/hooks/useRestoreSession";
+import { useProcessingStore, getAbortFlag, currentGeneration } from "@/lib/processing-store";
 import { Sparkles, Plus, Trash2, Download, Loader2, Minus, ExternalLink, Check, X, RotateCcw, ArrowUp, ArrowDown, Upload, ClipboardPaste, Pencil, Play } from "lucide-react";
 import Link from "next/link";
 import { toast } from "sonner";
@@ -19,6 +20,7 @@ import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstruct
 import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { getPrompt } from "@/lib/prompts";
 import { FileUploader } from "@/components/tools/FileUploader";
+import { SingleRunButton } from "@/components/tools/SingleRunButton";
 import { Textarea } from "@/components/ui/textarea";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
@@ -102,7 +104,7 @@ function normalizeType(raw: string): SuggestedField["type"] | null {
   return null;
 }
 
-type OutputFormat = "tabular" | "json" | "freetext" | "markdown";
+type OutputFormat = "tabular" | "json" | "freetext" | "markdown" | "gift";
 type Structure = "ai_decide" | "define_columns" | "use_template";
 type RunMode = "preview" | "test" | "full";
 
@@ -138,11 +140,190 @@ function parseJsonResponse(text: string): Array<{ name: string; type: string; de
   try { return JSON.parse(cleaned); } catch { return []; }
 }
 
+// ─── Module-level generation runner (survives navigation) ───────────────────
+
+const TOOL_ID = "/generate";
+const BATCH_SIZE = 25;
+
+const activeGenerateJobs = new Map<string, Promise<void>>();
+
+interface GenerateParams {
+  mode: RunMode;
+  provider: string;
+  model: string;
+  apiKey: string;
+  baseUrl?: string;
+  description: string;
+  outputFormat: string;
+  isFreetext: boolean;
+  isStructured: boolean;
+  columns?: GenerateColumn[];
+  rowCount: number;
+  aiInstructions: string;
+  resumeFrom?: number;
+  existingData?: Record<string, unknown>[];
+  existingRunId?: string | null;
+}
+
+async function executeGeneration(params: GenerateParams) {
+  const store = useProcessingStore.getState();
+  const totalCount = params.isFreetext ? 1 : (params.mode === "test" ? 10 : params.rowCount);
+  const startFrom = params.resumeFrom ?? 0;
+  const gen = store.startJob(TOOL_ID, params.mode, totalCount, startFrom);
+
+  const localRunId = params.resumeFrom && params.existingRunId
+    ? params.existingRunId
+    : await dispatchCreateRun({
+        runType: "generate",
+        provider: params.provider,
+        model: params.model,
+        systemPrompt: params.aiInstructions,
+        inputFile: "synthetic",
+        inputRows: totalCount,
+      });
+
+  if (params.isFreetext) {
+    const t0 = Date.now();
+    try {
+      const data = await dispatchGenerateRow({
+        provider: params.provider,
+        model: params.model,
+        apiKey: params.apiKey,
+        baseUrl: params.baseUrl,
+        rowCount: 1,
+        freeformPrompt: params.description || undefined,
+        outputFormat: params.outputFormat === "markdown" ? "markdown" : params.outputFormat === "gift" ? "gift" : "freetext",
+        systemPrompt: params.aiInstructions || undefined,
+      });
+      if (currentGeneration(TOOL_ID) !== gen) return;
+      const latency = Date.now() - t0;
+      const text = typeof data.raw === "string" ? data.raw : JSON.stringify(data.rows, null, 2);
+
+      if (localRunId) {
+        await dispatchSaveResults(localRunId, [{
+          rowIndex: 0,
+          input: { description: params.description || "synthetic", outputFormat: params.outputFormat },
+          output: text,
+          status: "success",
+          latency,
+        }]);
+      }
+
+      // Store raw text in a synthetic result row
+      store.completeJob(TOOL_ID, [{ _raw: text, _format: params.outputFormat, status: "success" }], { success: 1, errors: 0, avgLatency: latency }, localRunId);
+    } catch (err) {
+      if (currentGeneration(TOOL_ID) !== gen) return;
+      const latency = Date.now() - t0;
+      store.completeJob(TOOL_ID, [{ status: "error", error_msg: String(err) }], { success: 0, errors: 1, avgLatency: latency }, localRunId);
+    }
+    return;
+  }
+
+  // Batched structured generation
+  let accumulated: Record<string, unknown>[] = params.resumeFrom ? [...(params.existingData ?? [])] : [];
+  let errors = 0;
+  let generated = startFrom;
+  const latencies: number[] = [];
+  const effectiveStructure = params.isStructured && params.columns?.some((c) => c.name.trim()) ? "define_columns" : "ai_decide";
+
+  while (generated < totalCount) {
+    if (getAbortFlag(TOOL_ID) || currentGeneration(TOOL_ID) !== gen) break;
+
+    const batchSize = Math.min(BATCH_SIZE, totalCount - generated);
+
+    // Build context from already-generated rows so the LLM maintains consistency
+    // across batches and resume. Show a sample of up to 5 recent rows.
+    let contextPrompt = params.description || undefined;
+    if (accumulated.length > 0) {
+      const sample = accumulated.slice(-5);
+      const sampleText = JSON.stringify(sample, null, 2);
+      contextPrompt = `${params.description || "Generate realistic data."}\n\nHere are ${sample.length} rows already generated — continue producing new, unique rows that are consistent in style and content. Do NOT repeat these rows:\n${sampleText}`;
+    }
+
+    const t0 = Date.now();
+    try {
+      const data = await dispatchGenerateRow({
+        provider: params.provider,
+        model: params.model,
+        apiKey: params.apiKey,
+        baseUrl: params.baseUrl,
+        rowCount: batchSize,
+        columns: effectiveStructure === "define_columns" ? params.columns : undefined,
+        freeformPrompt: contextPrompt,
+        outputFormat: params.outputFormat,
+        systemPrompt: params.aiInstructions || undefined,
+      });
+
+      latencies.push(Date.now() - t0);
+      accumulated = [...accumulated, ...(data.rows as Row[])];
+      generated += data.rows.length;
+    } catch {
+      latencies.push(Date.now() - t0);
+      errors++;
+      generated += batchSize;
+    }
+
+    if (currentGeneration(TOOL_ID) === gen) {
+      // Update progress and intermediate results in store
+      useProcessingStore.setState((state) => ({
+        jobs: {
+          ...state.jobs,
+          [TOOL_ID]: {
+            ...state.jobs[TOOL_ID],
+            progress: { completed: generated, total: totalCount },
+            results: accumulated.map((row) => ({ ...row, status: "success" as const })),
+          },
+        },
+      }));
+    }
+  }
+
+  if (currentGeneration(TOOL_ID) !== gen) return;
+
+  // Compute average latency per row (spread batch latency across rows in that batch)
+  const totalLatency = latencies.reduce((a, b) => a + b, 0);
+  const avgLatency = accumulated.length > 0
+    ? Math.round(totalLatency / accumulated.length)
+    : 0;
+
+  if (localRunId && accumulated.length > 0) {
+    const resultRows = accumulated.map((row, i) => ({
+      rowIndex: i,
+      input: row as Record<string, unknown>,
+      output: JSON.stringify(row),
+      status: "success" as const,
+      latency: avgLatency,
+    }));
+    await dispatchSaveResults(localRunId, resultRows);
+  }
+  const computedStats = { success: accumulated.length, errors, avgLatency };
+  const finalResults = accumulated.map((row) => ({ ...row, _format: params.outputFormat, status: "success" as const }));
+  store.completeJob(TOOL_ID, finalResults, computedStats, localRunId);
+}
+
+function launchGeneration(params: GenerateParams): Promise<void> {
+  const promise = executeGeneration(params).catch((err) => {
+    const job = useProcessingStore.getState().jobs[TOOL_ID];
+    if (job?.isProcessing) {
+      useProcessingStore.getState().completeJob(TOOL_ID, job.results ?? [], { success: 0, errors: 0, avgLatency: 0 }, job.runId ?? null);
+    }
+    console.error("Generate error:", err);
+  }).finally(() => {
+    activeGenerateJobs.delete(TOOL_ID);
+  });
+  activeGenerateJobs.set(TOOL_ID, promise);
+  return promise;
+}
+
+// Stable default references (avoid new object per render → infinite loop)
+const defaultProgress = { completed: 0, total: 0 };
+const emptyResults: Record<string, unknown>[] = [];
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 export default function GeneratePage() {
   const activeModel = useActiveModel();
-  const { markProcessing, markIdle } = useProcessingFlag("/generate");
+  // Processing flag is now handled by processing-store automatically
 
   const [description, setDescription] = useSessionState("generate_description", "");
   const [outputFormat, setOutputFormat] = useSessionState<OutputFormat>("generate_outputFormat", "tabular");
@@ -151,18 +332,46 @@ export default function GeneratePage() {
   const [columns, setColumns] = useSessionState<GenerateColumn[]>("generate_columns", [
     { name: "", type: "text" },
   ]);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [aborting, setAborting] = useState(false);
-  const [runMode, setRunMode] = useState<RunMode>("full");
-  const [progress, setProgress] = useState({ completed: 0, total: 0 });
-  const [failedCount, setFailedCount] = useState(0);
-  const [skippedCount, setSkippedCount] = useState(0);
-  const [generatedData, setGeneratedData] = useSessionState<Row[]>("generate_generatedData", []);
-  const [generatedRaw, setGeneratedRaw] = useSessionState("generate_generatedRaw", "");
-  const [runId, setRunId] = useSessionState<string | null>("generate_runId", null);
-  const abortRef = useRef(false);
-  const [freetextProgress, setFreetextProgress] = useState(0);
-  const freetextTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Read processing state from the global store (survives navigation)
+  const isGenerating = useProcessingStore((s) => s.jobs[TOOL_ID]?.isProcessing ?? false);
+  const aborting = useProcessingStore((s) => s.jobs[TOOL_ID]?.aborting ?? false);
+  const runMode = useProcessingStore((s) => s.jobs[TOOL_ID]?.runMode ?? "full") as RunMode;
+  const progress = useProcessingStore((s) => s.jobs[TOOL_ID]?.progress ?? defaultProgress);
+  const storeResults = useProcessingStore((s) => s.jobs[TOOL_ID]?.results ?? emptyResults);
+  const runId = useProcessingStore((s) => s.jobs[TOOL_ID]?.runId ?? null);
+  const requestAbort = useProcessingStore((s) => s.requestAbort);
+  const clearJob = useProcessingStore((s) => s.clearJob);
+
+  // Use the format that was active when results were generated, not the current radio
+  const resultFormat = useMemo(() => {
+    if (storeResults.length === 0) return null;
+    return (storeResults[0]?._format as string) ?? null;
+  }, [storeResults]);
+
+  // Derive generated data from store results
+  const generatedData = useMemo(() => {
+    if (storeResults.length === 0) return [];
+    // Freetext results have _raw field, structured results don't
+    if (storeResults[0]?._raw) return [];
+    return storeResults;
+  }, [storeResults]);
+
+  const generatedRaw = useMemo(() => {
+    if (storeResults.length === 0) return "";
+    if (storeResults[0]?._raw) return storeResults[0]._raw as string;
+    if (resultFormat === "json" && storeResults.length > 0 && !storeResults[0]?._raw) {
+      return JSON.stringify(storeResults, null, 2);
+    }
+    return "";
+  }, [storeResults, resultFormat]);
+
+  const failedCount = useMemo(() => storeResults.filter((r) => r.status === "error").length, [storeResults]);
+  const skippedCount = useMemo(() => {
+    if (!isGenerating && progress.total > 0 && progress.completed < progress.total) {
+      return progress.total - progress.completed;
+    }
+    return 0;
+  }, [isGenerating, progress]);
 
   // ── Suggested fields state ──
   const [suggestedFields, setSuggestedFields] = useSessionState<SuggestedField[]>("generate_suggestedFields", [
@@ -178,7 +387,7 @@ export default function GeneratePage() {
   const [csvPasteText, setCsvPasteText] = useState("");
 
   const isStructured = outputFormat === "tabular" || outputFormat === "json";
-  const isFreetext = outputFormat === "freetext" || outputFormat === "markdown";
+  const isFreetext = outputFormat === "freetext" || outputFormat === "markdown" || outputFormat === "gift";
 
   // ── Auto-generate AI Instructions ──
   const buildAutoInstructions = useCallback(() => {
@@ -202,7 +411,14 @@ export default function GeneratePage() {
     }
 
     lines.push("OUTPUT RULES:");
-    if (outputFormat === "markdown") {
+    if (outputFormat === "gift") {
+      lines.push("- Format: Moodle GIFT (General Import Format Technology)");
+      lines.push("- Each question separated by a blank line");
+      lines.push("- Use GIFT syntax: = for correct answers, ~ for wrong answers");
+      lines.push("- Support all question types: multiple choice, true/false, short answer, matching, numerical, essay");
+      lines.push("");
+      lines.push("STRICTLY FORBIDDEN: JSON, code fences, HTML, markdown formatting.");
+    } else if (outputFormat === "markdown") {
       lines.push("- Format: Markdown with headings, lists, bold, tables where appropriate");
       lines.push("- Write well-structured, human-readable Markdown content");
       lines.push("");
@@ -262,6 +478,84 @@ export default function GeneratePage() {
       setStructure("define_columns");
     }
   }, [suggestedFields]);
+
+  // ── Session restore from history ──
+  const restored = useRestoreSession("generate");
+  useEffect(() => {
+    if (!restored) return;
+    queueMicrotask(() => {
+      const fullPrompt = restored.systemPrompt ?? "";
+
+      // Restore description
+      const descMatch = fullPrompt.match(/DATA DESCRIPTION:\n([\s\S]*?)(?:\n\n|$)/);
+      if (descMatch) setDescription(descMatch[1].trim());
+
+      // Restore output format
+      if (fullPrompt.includes("Format: Moodle GIFT")) setOutputFormat("gift");
+      else if (fullPrompt.includes("Format: Markdown")) setOutputFormat("markdown");
+      else if (fullPrompt.includes("Format: plain readable text")) setOutputFormat("freetext");
+      else if (fullPrompt.includes("Format: json")) setOutputFormat("json");
+      else if (fullPrompt.includes("Format: tabular")) setOutputFormat("tabular");
+
+      // Restore row count
+      const rowsMatch = fullPrompt.match(/Rows: (\d+)/);
+      if (rowsMatch) setRowCount(parseInt(rowsMatch[1], 10));
+
+      // Restore schema/columns
+      const schemaMatch = fullPrompt.match(/SCHEMA:\n([\s\S]*?)(?:\n\n|$)/);
+      if (schemaMatch) {
+        const fields: SuggestedField[] = schemaMatch[1].split("\n").map((line) => {
+          const m = line.match(/^- (.+?) \((\w+)\)(?:: (.+))?$/);
+          if (!m) return null;
+          return { name: m[1], type: (m[2] as SuggestedField["type"]) || "text", description: m[3] || "" };
+        }).filter((f): f is SuggestedField => f !== null);
+        if (fields.length > 0) {
+          setSuggestedFields(fields);
+          setColumnMode("suggest");
+          setHasSuggestedOnce(true);
+        }
+      }
+
+      // Restore results into processing-store
+      if (restored.results.length > 0) {
+        const firstResult = restored.results[0];
+        const output = firstResult.ai_output as string | undefined;
+        const isFreetextRestore = fullPrompt.includes("Format: plain readable text") ||
+          fullPrompt.includes("Format: Markdown") ||
+          fullPrompt.includes("Format: Moodle GIFT");
+        const isJsonRestore = fullPrompt.includes("Format: json");
+        const restoredFormat: string = isFreetextRestore ? "freetext"
+          : fullPrompt.includes("Format: Markdown") ? "markdown"
+          : fullPrompt.includes("Format: Moodle GIFT") ? "gift"
+          : isJsonRestore ? "json" : "tabular";
+
+        if ((isFreetextRestore || isJsonRestore) && output) {
+          useProcessingStore.getState().completeJob(
+            TOOL_ID,
+            [{ _raw: output, _format: restoredFormat, status: "success" }],
+            { success: 1, errors: 0, avgLatency: 0 },
+            restored.runId,
+          );
+        } else {
+          const cleanResults = restored.results.map((row) => {
+            const clean: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(row)) {
+              if (k !== "status" && k !== "latency_ms" && k !== "error_msg" && k !== "ai_output") clean[k] = v;
+            }
+            return { ...clean, _format: restoredFormat, status: "success" };
+          });
+          useProcessingStore.getState().completeJob(
+            TOOL_ID,
+            cleanResults,
+            { success: cleanResults.length, errors: 0, avgLatency: 0 },
+            restored.runId,
+          );
+        }
+      }
+
+      toast.success(`Restored generate session (${restored.results.length} results)`);
+    });
+  }, [restored]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── AI suggest fields ──
   const suggestFields = async () => {
@@ -332,7 +626,12 @@ export default function GeneratePage() {
 
   // ── From pasted CSV text ──
   const extractFromPastedCsv = useCallback(() => {
-    if (!csvPasteText.trim()) return toast.error("Paste some text first.");
+    if (!csvPasteText.trim()) {
+      setSuggestedFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]);
+      setCsvPasteText("");
+      setPasteExtracted(true);
+      return;
+    }
     const lines = csvPasteText.trim().split("\n").filter((l) => l.trim());
     const fields: SuggestedField[] = [];
     const warnings: string[] = [];
@@ -347,7 +646,12 @@ export default function GeneratePage() {
       const description = parts.slice(2).join(", ");
       fields.push({ name, type, description });
     }
-    if (fields.length === 0) return toast.error("No columns found. Use format: column_name, type, description");
+    if (fields.length === 0) {
+      setSuggestedFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]);
+      setCsvPasteText("");
+      setPasteExtracted(true);
+      return;
+    }
     if (warnings.length > 0) toast.warning(warnings.join("\n"));
     setSuggestedFields(fields);
     setCsvPasteText("");
@@ -355,167 +659,55 @@ export default function GeneratePage() {
     toast.success(`${fields.length} columns extracted`);
   }, [csvPasteText]);
 
-  const BATCH_SIZE = 25;
-
-  // ── Generate (batched for structured, single call for freetext) ──
-  const generate = async (mode: RunMode, resumeFrom?: number) => {
+  // ── Generate (delegates to module-level runner) ──
+  const generate = useCallback(async (mode: RunMode, resumeFrom?: number) => {
     if (!activeModel) return toast.error("No model configured. Add an API key in Settings.");
     if (!description.trim()) return toast.error("Enter a description first.");
     if (isStructured && !columns.some((c) => c.name.trim())) return toast.error("Define at least one column.");
     if (isStructured && columns.some((c) => c.name.trim()) && columns.some((c) => !c.name.trim())) return toast.error("All column names must be filled in.");
 
-    const effectiveStructure = isStructured && columns.some((c) => c.name.trim()) ? "define_columns" : "ai_decide";
-
-    abortRef.current = false;
-    setAborting(false);
-    setIsGenerating(true);
-    markProcessing();
-    setRunMode(mode);
-    setFailedCount(0);
-    setSkippedCount(0);
-
-    if (!resumeFrom) {
-      setRunId(null);
-      setGeneratedData([]);
-      setGeneratedRaw("");
-    }
-
-    const localRunId = resumeFrom ? runId : await dispatchCreateRun({
-      runType: "generate",
+    await launchGeneration({
+      mode,
       provider: activeModel.providerId,
       model: activeModel.defaultModel,
-      inputFile: "synthetic",
-      inputRows: isStructured ? (mode === "test" ? 10 : rowCount) : 1,
+      apiKey: activeModel.apiKey || "",
+      baseUrl: activeModel.baseUrl,
+      description,
+      outputFormat,
+      isFreetext,
+      isStructured,
+      columns: columns.filter((c) => c.name.trim()),
+      rowCount,
+      aiInstructions,
+      resumeFrom,
+      existingData: resumeFrom ? generatedData : undefined,
+      existingRunId: resumeFrom ? runId : undefined,
     });
 
-    if (isFreetext) {
-      // Single call for free text / markdown — estimated progress
-      setFreetextProgress(0);
-      const startTime = Date.now();
-      const estimatedMs = 15000; // estimate ~15s for generation
-      freetextTimerRef.current = setInterval(() => {
-        const elapsed = Date.now() - startTime;
-        // Asymptotic curve: approaches 90% but never reaches it
-        const pct = Math.min(90, (elapsed / estimatedMs) * 90);
-        setFreetextProgress(Math.round(pct));
-      }, 300);
-
-      try {
-        const data = await dispatchGenerateRow({
-          provider: activeModel.providerId,
-          model: activeModel.defaultModel,
-          apiKey: activeModel.apiKey || "",
-          baseUrl: activeModel.baseUrl,
-          rowCount: 1,
-          freeformPrompt: description || undefined,
-          outputFormat: outputFormat === "markdown" ? "markdown" : "freetext",
-          systemPrompt: aiInstructions || undefined,
-        });
-        const text = typeof data.raw === "string" ? data.raw : JSON.stringify(data.rows, null, 2);
-        setGeneratedRaw(text);
-        setFreetextProgress(100);
-        setRunId(localRunId);
-        toast.success("Generated successfully");
-      } catch (err: unknown) {
-        setFailedCount(1);
-        const msg = err instanceof Error ? err.message : String(err);
-        toast.error("Generation failed", { description: msg });
-      } finally {
-        if (freetextTimerRef.current) clearInterval(freetextTimerRef.current);
-        freetextTimerRef.current = null;
-        setIsGenerating(false);
-        markIdle();
+    // Toast on completion (only if we're still on this page)
+    const job = useProcessingStore.getState().jobs[TOOL_ID];
+    if (job && !job.isProcessing) {
+      if (job.stats?.errors === 0 && job.results.length > 0) {
+        toast.success(isFreetext ? "Generated successfully" : `Generated ${job.results.length} rows`);
+      } else if (job.stats?.errors) {
+        toast.warning(`Done — ${job.stats.errors} batch(es) had errors`);
       }
-      return;
     }
-
-    // Batched generation for structured formats
-    const totalCount = mode === "test" ? 10 : rowCount;
-    const startFrom = resumeFrom ?? 0;
-    setProgress({ completed: startFrom, total: totalCount });
-
-    let accumulated: Row[] = resumeFrom ? [...generatedData] : [];
-    let errors = 0;
-    let generated = startFrom;
-
-    while (generated < totalCount) {
-      if (abortRef.current) {
-        setSkippedCount(totalCount - generated);
-        setAborting(false);
-        break;
-      }
-
-      const batchSize = Math.min(BATCH_SIZE, totalCount - generated);
-      try {
-        const data = await dispatchGenerateRow({
-          provider: activeModel.providerId,
-          model: activeModel.defaultModel,
-          apiKey: activeModel.apiKey || "",
-          baseUrl: activeModel.baseUrl,
-          rowCount: batchSize,
-          columns: effectiveStructure === "define_columns" ? columns : undefined,
-          freeformPrompt: description || undefined,
-          outputFormat,
-          systemPrompt: aiInstructions || undefined,
-        });
-
-        if (outputFormat === "tabular") {
-          accumulated = [...accumulated, ...(data.rows as Row[])];
-          setGeneratedData(accumulated);
-        } else {
-          // JSON
-          accumulated = [...accumulated, ...(data.rows as Row[])];
-          setGeneratedRaw(JSON.stringify(accumulated, null, 2));
-        }
-
-        generated += data.rows.length;
-      } catch (err: unknown) {
-        errors++;
-        generated += batchSize;
-        const msg = err instanceof Error ? err.message : String(err);
-        toast.error(`Batch failed: ${msg}`);
-      }
-
-      setProgress({ completed: generated, total: totalCount });
-    }
-
-    setFailedCount(errors);
-    setIsGenerating(false);
-    markIdle();
-
-    if (localRunId && accumulated.length > 0) {
-      const resultRows = accumulated.map((row, i) => ({
-        rowIndex: i,
-        input: row as Record<string, unknown>,
-        output: JSON.stringify(row),
-        status: "success" as const,
-      }));
-      await dispatchSaveResults(localRunId, resultRows);
-    }
-    if (!resumeFrom) setRunId(localRunId);
-
-    if (!abortRef.current && errors === 0) {
-      toast.success(`Generated ${accumulated.length} rows`);
-    }
-  };
+  }, [activeModel, description, outputFormat, isFreetext, isStructured, columns, rowCount, aiInstructions, generatedData, runId]);
 
   const handleAbort = useCallback(() => {
-    abortRef.current = true;
-    setAborting(true);
-  }, []);
+    requestAbort(TOOL_ID);
+  }, [requestAbort]);
 
   const handleResume = useCallback(() => {
-    generate(runMode, progress.completed);
-  }, [runMode, progress.completed]);
+    // Preserve original run mode (e.g. "test" = 10 rows) instead of hardcoding "full"
+    const originalMode = useProcessingStore.getState().jobs[TOOL_ID]?.runMode ?? "full";
+    generate(originalMode, progress.completed);
+  }, [generate, progress.completed]);
 
   const handleCancel = useCallback(() => {
-    setGeneratedData([]);
-    setGeneratedRaw("");
-    setProgress({ completed: 0, total: 0 });
-    setFailedCount(0);
-    setSkippedCount(0);
-    setRunId(null);
-  }, []);
+    clearJob(TOOL_ID);
+  }, [clearJob]);
 
 
   return (
@@ -529,13 +721,12 @@ export default function GeneratePage() {
             Create synthetic datasets with AI-powered generation. Describe what you need and let AI build it for you.
           </p>
         </div>
-        {(description.trim() || suggestedFields.length > 0 || generatedData.length > 0) && (
-          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("generate_"); setGeneratedData([]); setGeneratedRaw(""); setDescription(""); setRunId(null); setColumns([{ name: "", type: "text" }]); setOutputFormat("tabular"); setStructure("ai_decide"); setRowCount(100); setSuggestedFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]); setHasSuggestedOnce(false); setAiInstructions(""); setColumnMode("suggest"); setFileExtracted(false); setPasteExtracted(false); }}>
+        <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("generate_"); clearJob(TOOL_ID); setDescription(""); setColumns([{ name: "", type: "text" }]); setOutputFormat("tabular"); setStructure("ai_decide"); setRowCount(100); setSuggestedFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]); setHasSuggestedOnce(false); setAiInstructions(""); setColumnMode("suggest"); setFileExtracted(false); setPasteExtracted(false); }}>
             <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
-        )}
       </div>
 
+      <div className={isGenerating ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Describe Your Data ───────────────────────────────────────── */}
       <div className="space-y-3 pb-8">
         <h2 className="text-2xl font-bold">1. Describe Data</h2>
@@ -561,30 +752,58 @@ export default function GeneratePage() {
       {/* ── 2. Output Format ──────────────────────────────────────────────── */}
       <div className="space-y-3 py-8">
         <h2 className="text-2xl font-bold">2. Output Format</h2>
-        <div className="space-y-2">
-          {([
-            { value: "tabular", label: "CSV/Excel", desc: "Structured rows and columns - best for spreadsheets and data analysis" },
-            { value: "json", label: "JSON", desc: "Nested structured data - best for APIs and complex relationships" },
-            { value: "freetext", label: "Free Text", desc: "Unstructured text output - best for qualitative data" },
-            { value: "markdown", label: "Markdown", desc: "Formatted text with headings, lists, and emphasis - best for documents and reports" },
-          ] as const).map(({ value, label, desc }) => (
-            <label key={value} className="flex items-start gap-2.5 cursor-pointer group">
-              <input
-                type="radio"
-                name="outputFormat"
-                value={value}
-                checked={outputFormat === value}
-                onChange={() => setOutputFormat(value)}
-                className="mt-0.5 accent-primary"
-              />
-              <div>
-                <div className="text-sm font-medium leading-snug">{label}</div>
-                {outputFormat === value && (
-                  <div className="text-xs text-muted-foreground mt-0.5">{desc}</div>
-                )}
-              </div>
-            </label>
-          ))}
+        <div className="grid grid-cols-2 gap-6">
+          {/* Structured Data */}
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Structured Data</p>
+            {([
+              { value: "tabular", label: "CSV/Excel", desc: "Structured rows and columns - best for spreadsheets and data analysis" },
+              { value: "json", label: "JSON", desc: "Nested structured data - best for APIs and complex relationships" },
+            ] as const).map(({ value, label, desc }) => (
+              <label key={value} className="flex items-start gap-2.5 cursor-pointer group">
+                <input
+                  type="radio"
+                  name="outputFormat"
+                  value={value}
+                  checked={outputFormat === value}
+                  onChange={() => setOutputFormat(value)}
+                  className="mt-0.5 accent-primary"
+                />
+                <div>
+                  <div className="text-sm font-medium leading-snug">{label}</div>
+                  {outputFormat === value && (
+                    <div className="text-xs text-muted-foreground mt-0.5">{desc}</div>
+                  )}
+                </div>
+              </label>
+            ))}
+          </div>
+          {/* Unstructured Data */}
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Unstructured Data</p>
+            {([
+              { value: "freetext", label: "Free Text", desc: "Unstructured text output - best for qualitative data" },
+              { value: "markdown", label: "Markdown", desc: "Formatted text with headings, lists, and emphasis - best for documents and reports" },
+              { value: "gift", label: "GIFT (Moodle)", desc: "Moodle quiz format - generates questions importable into Moodle LMS" },
+            ] as const).map(({ value, label, desc }) => (
+              <label key={value} className="flex items-start gap-2.5 cursor-pointer group">
+                <input
+                  type="radio"
+                  name="outputFormat"
+                  value={value}
+                  checked={outputFormat === value}
+                  onChange={() => setOutputFormat(value)}
+                  className="mt-0.5 accent-primary"
+                />
+                <div>
+                  <div className="text-sm font-medium leading-snug">{label}</div>
+                  {outputFormat === value && (
+                    <div className="text-xs text-muted-foreground mt-0.5">{desc}</div>
+                  )}
+                </div>
+              </label>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -608,6 +827,15 @@ export default function GeneratePage() {
               Suggest with AI
             </Button>
             <Button
+              variant={columnMode === "paste" ? "default" : "outline"}
+              size="sm"
+              className="text-xs"
+              onClick={() => setColumnMode("paste")}
+            >
+              <ClipboardPaste className="h-3.5 w-3.5 mr-1.5" />
+              Type CSV
+            </Button>
+            <Button
               variant={columnMode === "file" ? "default" : "outline"}
               size="sm"
               className="text-xs"
@@ -615,15 +843,6 @@ export default function GeneratePage() {
             >
               <Upload className="h-3.5 w-3.5 mr-1.5" />
               Import CSV/Excel
-            </Button>
-            <Button
-              variant={columnMode === "paste" ? "default" : "outline"}
-              size="sm"
-              className="text-xs"
-              onClick={() => setColumnMode("paste")}
-            >
-              <ClipboardPaste className="h-3.5 w-3.5 mr-1.5" />
-              Paste CSV
             </Button>
             <Button
               variant="outline"
@@ -722,7 +941,7 @@ export default function GeneratePage() {
               setFileExtracted(false);
               setSuggestedFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]);
             }}>
-              <Upload className="h-3.5 w-3.5 mr-1.5" /> Re-import
+              <Upload className="h-3.5 w-3.5 mr-1.5" /> {fileExtracted ? "Re-import" : "Import"}
             </Button>
             <div className="border rounded-lg overflow-hidden">
               <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Column Schema</div>
@@ -857,6 +1076,7 @@ export default function GeneratePage() {
           <NoModelWarning activeModel={activeModel} />
         </div>
       )}
+      </div>
 
       <div className="border-t" />
 
@@ -914,15 +1134,16 @@ export default function GeneratePage() {
             <div className="flex justify-between text-xs text-muted-foreground">
               <span className="flex items-center gap-1.5">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Generating content{"\u2026"}
+                {aborting ? "Stopping\u2026" : "Generating content\u2026"}
               </span>
-              <span>{freetextProgress}%</span>
+              {!aborting && (
+                <Button variant="outline" size="sm" onClick={handleAbort} className="h-6 px-2 text-[11px] border-red-300 text-red-600 hover:bg-red-50">
+                  Stop
+                </Button>
+              )}
             </div>
             <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
-              <div
-                className="bg-black dark:bg-white h-full transition-all duration-300"
-                style={{ width: `${freetextProgress}%` }}
-              />
+              <div className={`${aborting ? "bg-amber-400" : "bg-black dark:bg-white"} h-full animate-pulse`} style={{ width: "60%" }} />
             </div>
           </div>
         )}
@@ -942,11 +1163,11 @@ export default function GeneratePage() {
             </Button>
             <div className="flex items-center h-12 rounded-lg overflow-hidden border border-red-500">
               <button
-                className="h-full px-4 bg-red-500 hover:bg-red-600 text-white border-r border-red-300/50 transition-colors disabled:opacity-50"
+                className="h-full px-5 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white border-r border-red-400/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 onClick={() => setRowCount((n) => Math.max(10, n - 10))}
                 disabled={isGenerating || rowCount <= 10 || !canGenerate || !activeModel}
               >
-                <Minus className="h-4 w-4" />
+                <Minus className="h-5 w-5 stroke-[2.5]" />
               </button>
               <Button
                 size="lg"
@@ -958,24 +1179,22 @@ export default function GeneratePage() {
                 {isGenerating && runMode === "full" ? "Generating…" : `Generate All (${rowCount} rows)`}
               </Button>
               <button
-                className="h-full px-4 bg-red-500 hover:bg-red-600 text-white border-l border-red-300/50 transition-colors disabled:opacity-50"
+                className="h-full px-5 bg-red-600 hover:bg-red-700 active:bg-red-800 text-white border-l border-red-400/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 onClick={() => setRowCount((n) => n + 10)}
                 disabled={isGenerating || !canGenerate || !activeModel}
               >
-                <Plus className="h-4 w-4" />
+                <Plus className="h-5 w-5 stroke-[2.5]" />
               </button>
             </div>
           </div>
         ) : (
-          <Button
-            size="lg"
-            className="w-full h-12 text-base bg-red-500 hover:bg-red-600 text-white"
-            disabled={!canGenerate || isGenerating || !activeModel}
-            onClick={() => generate("full")}
-          >
-            {isGenerating ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Sparkles className="h-4 w-4 mr-2" />}
-            {isGenerating ? "Generating…" : "Generate"}
-          </Button>
+          <SingleRunButton
+            label="Generate"
+            runningLabel="Generating…"
+            isProcessing={isGenerating}
+            disabled={!canGenerate || !activeModel}
+            onRun={() => generate("full")}
+          />
         )}
       </div>
 
@@ -998,9 +1217,9 @@ export default function GeneratePage() {
                   View in History
                 </Link>
               )}
-              {generatedRaw && outputFormat !== "tabular" && (
+              {generatedRaw && resultFormat && resultFormat !== "tabular" && (
                 <Button variant="outline" className="gap-2 px-5" onClick={() => {
-                  const ext = outputFormat === "json" ? "json" : outputFormat === "markdown" ? "md" : "txt";
+                  const ext = resultFormat === "json" ? "json" : resultFormat === "markdown" ? "md" : resultFormat === "gift" ? "gift" : "txt";
                   const blob = new Blob([generatedRaw], { type: "text/plain;charset=utf-8;" });
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a"); a.href = url; a.download = `generated_${Date.now()}.${ext}`; a.click();
@@ -1012,20 +1231,22 @@ export default function GeneratePage() {
             </div>
           </div>
 
-          {generatedData.length > 0 ? (
-            <div className="border rounded-lg overflow-hidden">
-              <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium flex items-center justify-between">
+          {generatedData.length > 0 && resultFormat !== "json" ? (
+            <div>
+              <div className="px-4 py-2.5 border border-b-0 rounded-t-lg bg-muted/20 text-sm font-medium flex items-center justify-between">
                 <span>Generated Data — {generatedData.length} rows</span>
                 <ExportDropdown data={generatedData} filename="generated_data" />
               </div>
-              <DataTable data={generatedData} />
+              <div className="border rounded-b-lg overflow-hidden">
+                <DataTable data={generatedData} />
+              </div>
             </div>
-          ) : (
+          ) : generatedRaw ? (
             <div className="border rounded-lg overflow-hidden">
               <div className="px-4 py-2.5 border-b bg-muted/20 text-xs font-medium text-muted-foreground">Raw output</div>
               <pre className="p-4 text-xs font-mono whitespace-pre-wrap">{generatedRaw}</pre>
             </div>
-          )}
+          ) : null}
         </div>
       )}
     </div>

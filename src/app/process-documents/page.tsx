@@ -1,8 +1,10 @@
 "use client";
 
-import React, { useState, useCallback, useRef, useMemo } from "react";
+import React, { useState, useCallback, useMemo, useEffect } from "react";
+import { useFilesRef, useFileStatuses, fileKey } from "@/hooks/useFilesRef";
 import { useDropzone } from "react-dropzone";
 import { Button } from "@/components/ui/button";
+import { ResultsPanel } from "@/components/tools/ResultsPanel";
 import { PromptEditor } from "@/components/tools/PromptEditor";
 import { useActiveModel, useSystemSettings } from "@/lib/hooks";
 import { NoModelWarning } from "@/components/tools/NoModelWarning";
@@ -10,6 +12,8 @@ import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection"
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { useBatchProcessor } from "@/hooks/useBatchProcessor";
+import { useRestoreSession } from "@/hooks/useRestoreSession";
+import { useProcessingStore } from "@/lib/processing-store";
 import { ExecutionPanel } from "@/components/tools/ExecutionPanel";
 import Link from "next/link";
 import {
@@ -28,21 +32,13 @@ import {
 import { toast } from "sonner";
 import type { FileState } from "@/types";
 import { dispatchDocumentProcess } from "@/lib/llm-dispatch";
-import { downloadCSV, downloadXLSX, downloadText, downloadMarkdown } from "@/lib/export";
+import { downloadText, downloadMarkdown } from "@/lib/export";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 type Row = Record<string, unknown>;
 
-const OUTPUT_FORMATS = [
-  { value: "csv", label: "CSV" },
-  { value: "xlsx", label: "Excel (.xlsx)" },
-  { value: "json", label: "JSON" },
-  { value: "txt", label: "Text (.txt)" },
-  { value: "md", label: "Markdown (.md)" },
-] as const;
-
-type OutputFormat = (typeof OUTPUT_FORMATS)[number]["value"];
+type OutputFormat = "csv" | "json" | "txt" | "md" | "gift";
 
 const SAMPLE_PROMPTS: Record<string, string> = {
   "Summarize in 3 bullet points": "Summarize this document in 3 bullet points",
@@ -78,8 +74,7 @@ export default function ProcessDocumentsPage() {
 
   // ── Section 1: Documents
   const [fileStates, setFileStates] = useSessionState<FileState[]>("procdocs2_fileStates", []);
-  const filesRef = useRef<Map<string, File>>(new Map());
-  const fileKey = (f: File) => `${f.name}__${f.size}`;
+  const filesRef = useFilesRef();
 
   // ── Section 2: Output Format
   const [outputFormat, setOutputFormat] = useSessionState<OutputFormat>("procdocs2_outputFormat", "txt");
@@ -99,6 +94,24 @@ export default function ProcessDocumentsPage() {
       lines.push("");
     }
 
+    lines.push("OUTPUT FORMAT:");
+    if (outputFormat === "csv") {
+      lines.push("- Return ONLY raw CSV. Row 1: header. Rows 2+: one record per row.");
+      lines.push("- Wrap fields containing commas or line breaks in double quotes.");
+      lines.push("- STRICTLY FORBIDDEN: markdown, code blocks, JSON, explanations, or prose.");
+    } else if (outputFormat === "json") {
+      lines.push("- Return ONLY a JSON array of objects. Nothing else.");
+      lines.push("- STRICTLY FORBIDDEN: markdown, code fences, CSV, prose, or any text outside the JSON array.");
+    } else if (outputFormat === "md") {
+      lines.push("- Return Markdown with headings, lists, bold, tables where appropriate.");
+    } else if (outputFormat === "gift") {
+      lines.push("- Return Moodle GIFT format (General Import Format Technology).");
+      lines.push("- Each question on its own line using GIFT syntax.");
+    } else {
+      lines.push("- Return plain readable text.");
+    }
+    lines.push("");
+
     lines.push("RULES:");
     lines.push("- Follow the instructions precisely");
     lines.push("- Base your response only on the document content provided");
@@ -107,7 +120,7 @@ export default function ProcessDocumentsPage() {
     lines.push(AI_INSTRUCTIONS_MARKER);
 
     return lines.join("\n");
-  }, [customPrompt]);
+  }, [customPrompt, outputFormat]);
 
   // ── Section 4: AI Instructions
   const [aiInstructions, setAiInstructions] = useAIInstructions(buildAutoInstructions);
@@ -133,7 +146,7 @@ export default function ProcessDocumentsPage() {
         ...valid.map((f): FileState => ({ file: f, status: "pending" })),
       ]);
     },
-    [setFileStates]
+    [setFileStates, filesRef]
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -191,9 +204,12 @@ export default function ProcessDocumentsPage() {
       });
 
       const latency = Date.now() - t0;
+
       return {
         document_name: file.name,
         output: result.text,
+        ...(outputFormat === "csv" ? { _all_records: result.text } : {}),
+        _format: outputFormat,
         status: "success",
         latency_ms: latency,
       };
@@ -209,20 +225,48 @@ export default function ProcessDocumentsPage() {
     onComplete: () => {},
   });
 
-  // ── Derive file statuses from batch results ───────────────────────────────
-  const fileStatuses = useMemo(() => {
-    if (!batch.results.length) return fileStates.map((fs) => fs.status);
-    return fileStates.map((_, i) => {
-      const r = batch.results[i];
-      if (!r) return "pending" as const;
-      if (r.status === "error") return "error" as const;
-      if (r.status === "skipped") return "pending" as const;
-      if (r.status === "success") return "done" as const;
-      return "pending" as const;
+  // ── Session restore from history ──────────────────────────────────────────
+  const restored = useRestoreSession("process-documents");
+  useEffect(() => {
+    if (!restored) return;
+    queueMicrotask(() => {
+      // Detect output format from saved system prompt
+      const sp = restored.systemPrompt ?? "";
+      const fmt: OutputFormat = sp.includes("Return ONLY raw CSV") ? "csv"
+        : sp.includes("Return ONLY a JSON array") ? "json"
+        : sp.includes("Return Markdown") ? "md"
+        : sp.includes("Return Moodle GIFT format") ? "gift"
+        : "txt";
+      setOutputFormat(fmt);
+
+      // Restore AI instructions and custom prompt
+      setAiInstructions(sp);
+      const instrMatch = sp.match(/USER INSTRUCTIONS:\n([\s\S]*?)(?:\n\nOUTPUT FORMAT:|$)/);
+      if (instrMatch) setCustomPrompt(instrMatch[1].trim());
+
+      // Populate results in global processing store (no files to restore, just results)
+      const errors = restored.results.filter((r) => r.status === "error").length;
+      useProcessingStore.getState().completeJob(
+        "/process-documents",
+        restored.results,
+        { success: restored.results.length - errors, errors, avgLatency: 0 },
+        restored.runId,
+      );
+      toast.success(`Restored session: ${restored.results.length} document(s)`);
     });
-  }, [batch.results, fileStates]);
+  }, [restored, setOutputFormat, setAiInstructions, setCustomPrompt]);
+
+  const fileStatuses = useFileStatuses(fileStates, batch.results);
 
   // ── Build results for display ─────────────────────────────────────────────
+  // Use the format that was active when processing ran, not the current radio selection
+  const resultFormat = useMemo(() => {
+    const first = batch.results.find((r) => r.status === "success");
+    return (first?._format as string) ?? null;
+  }, [batch.results]);
+  const isTabular = resultFormat === "csv";
+
+  // Text results (for text/markdown/gift/json display)
   const allResults: DocResult[] = useMemo(() => {
     return batch.results
       .filter((r) => r.status === "success" && r.output)
@@ -232,18 +276,53 @@ export default function ProcessDocumentsPage() {
       }));
   }, [batch.results]);
 
-  // ── Export ──────────────────────────────────────────────────────────────────
-  const handleExport = () => {
+  // Parsed tabular results (for CSV/Excel display — parses LLM CSV output into rows)
+  const tableResults: Row[] = useMemo(() => {
+    if (!isTabular) return [];
+    const rows: Row[] = [];
+    for (const r of batch.results) {
+      if (r.status !== "success" || !r._all_records) continue;
+      const raw = (r._all_records as string)
+        .replace(/^```(?:csv|json)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+
+      const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      if (lines.length >= 2) {
+        const parseCsvRow = (line: string): string[] => {
+          const values: string[] = [];
+          let current = "";
+          let inQuotes = false;
+          for (let i = 0; i < line.length; i++) {
+            const ch = line[i];
+            if (ch === '"') {
+              if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+              else { inQuotes = !inQuotes; }
+            } else if (ch === "," && !inQuotes) {
+              values.push(current); current = "";
+            } else {
+              current += ch;
+            }
+          }
+          values.push(current);
+          return values.map((v) => v.trim());
+        };
+        const headers = parseCsvRow(lines[0]);
+        for (let li = 1; li < lines.length; li++) {
+          const values = parseCsvRow(lines[li]);
+          const row: Row = { document_name: r.document_name as string };
+          headers.forEach((h, i) => { if (h) row[h] = values[i] ?? ""; });
+          rows.push(row);
+        }
+      }
+    }
+    return rows;
+  }, [batch.results, isTabular]);
+
+  // ── Export (text formats only — CSV/Excel uses ExportDropdown) ───────────────
+  const handleExportText = () => {
     if (allResults.length === 0) return;
     const fname = "processed_documents";
 
     switch (outputFormat) {
-      case "csv":
-        void downloadCSV(allResults.map((r) => ({ document_name: r.document_name, output: r.output })), `${fname}.csv`);
-        break;
-      case "xlsx":
-        void downloadXLSX(allResults.map((r) => ({ document_name: r.document_name, output: r.output })), `${fname}.xlsx`);
-        break;
       case "json": {
         const blob = new Blob([JSON.stringify(allResults, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
@@ -259,6 +338,9 @@ export default function ProcessDocumentsPage() {
         break;
       case "md":
         downloadMarkdown(allResults, fname);
+        break;
+      case "gift":
+        downloadText(allResults, `${fname}.gift`);
         break;
     }
   };
@@ -283,11 +365,9 @@ export default function ProcessDocumentsPage() {
             Upload documents, write instructions, and get free-form AI output
           </p>
         </div>
-        {fileStates.length > 0 && (
-          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("procdocs2_"); batch.clearResults(); filesRef.current.clear(); setFileStates([]); setCustomPrompt(""); setOutputFormat("txt"); setAiInstructions(""); }}>
+        <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("procdocs2_"); batch.clearResults(); filesRef.current.clear(); setFileStates([]); setCustomPrompt(""); setOutputFormat("txt"); setAiInstructions(""); }}>
             <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
-        )}
       </div>
 
       <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
@@ -373,23 +453,58 @@ export default function ProcessDocumentsPage() {
       {/* ── 2. Output Format ──────────────────────────────────────────── */}
       <div className="space-y-3 py-8">
         <h2 className="text-2xl font-bold">2. Output Format</h2>
-        <p className="text-sm text-muted-foreground -mt-1">
-          Choose the export format for your processed results.
-        </p>
-        <div className="flex flex-wrap gap-2">
-          {OUTPUT_FORMATS.map((fmt) => (
-            <button
-              key={fmt.value}
-              onClick={() => setOutputFormat(fmt.value)}
-              className={`px-4 py-2 rounded-lg border text-sm transition-colors ${
-                outputFormat === fmt.value
-                  ? "border-primary bg-primary/10 text-primary font-medium"
-                  : "border-border hover:border-primary/50 hover:bg-muted/30 text-muted-foreground"
-              }`}
-            >
-              {fmt.label}
-            </button>
-          ))}
+        <div className="grid grid-cols-2 gap-6">
+          {/* Structured Data */}
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Structured Data</p>
+            {([
+              { value: "csv" as const, label: "CSV/Excel", desc: "Tabular rows and columns — best for spreadsheets and data analysis" },
+              { value: "json" as const, label: "JSON", desc: "Structured key-value data — best for APIs and nested content" },
+            ]).map(({ value, label, desc }) => (
+              <label key={value} className="flex items-start gap-2.5 cursor-pointer group">
+                <input
+                  type="radio"
+                  name="outputFormat"
+                  value={value}
+                  checked={outputFormat === value}
+                  onChange={() => setOutputFormat(value)}
+                  className="mt-0.5 accent-primary"
+                />
+                <div>
+                  <div className="text-sm font-medium leading-snug">{label}</div>
+                  {outputFormat === value && (
+                    <div className="text-xs text-muted-foreground mt-0.5">{desc}</div>
+                  )}
+                </div>
+              </label>
+            ))}
+          </div>
+          {/* Unstructured Data */}
+          <div className="space-y-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Unstructured Data</p>
+            {([
+              { value: "txt" as const, label: "Free Text", desc: "Plain text output — best for summaries and free-form answers" },
+              { value: "md" as const, label: "Markdown", desc: "Formatted text with headings, lists, and emphasis — best for reports" },
+              { value: "gift" as const, label: "GIFT (Moodle)", desc: "Moodle quiz format — generates questions importable into Moodle LMS" },
+            ]).map(({ value, label, desc }) => (
+              <label key={value} className="flex items-start gap-2.5 cursor-pointer group">
+                <input
+                  type="radio"
+                  name="outputFormat"
+                  value={value}
+                  checked={outputFormat === value}
+                  onChange={() => setOutputFormat(value)}
+                  className="mt-0.5 accent-primary"
+                />
+                <div>
+                  <div className="text-sm font-medium leading-snug">{label}</div>
+                  {outputFormat === value && (
+                    <div className="text-xs text-muted-foreground mt-0.5">{desc}</div>
+                  )}
+                </div>
+              </label>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -447,7 +562,14 @@ export default function ProcessDocumentsPage() {
       </div>
 
       {/* ── Results ─────────────────────────────────────────────────────── */}
-      {allResults.length > 0 && (
+      {isTabular && tableResults.length > 0 ? (
+        <ResultsPanel
+          results={tableResults}
+          runId={batch.runId}
+          title="Results"
+          subtitle={`${tableResults.length} rows from ${allResults.length} document${allResults.length !== 1 ? "s" : ""}`}
+        />
+      ) : allResults.length > 0 && (
         <div className="space-y-4 border-t pt-6 pb-8">
           <div className="flex items-center justify-between">
             <div>
@@ -466,9 +588,11 @@ export default function ProcessDocumentsPage() {
                   View in History
                 </Link>
               )}
-              <Button variant="outline" size="sm" className="text-xs" onClick={handleExport}>
-                Export as {OUTPUT_FORMATS.find((f) => f.value === outputFormat)?.label ?? outputFormat}
-              </Button>
+              {resultFormat && (
+                <Button variant="outline" size="sm" className="text-xs" onClick={handleExportText}>
+                  Export as {resultFormat === "json" ? "JSON" : resultFormat === "md" ? "Markdown" : resultFormat === "gift" ? "GIFT" : "Text"}
+                </Button>
+              )}
             </div>
           </div>
 
@@ -489,7 +613,7 @@ export default function ProcessDocumentsPage() {
                   </button>
                 </div>
                 <div className="p-4">
-                  <pre className="whitespace-pre-wrap text-sm leading-relaxed font-sans">{result.output}</pre>
+                  <pre className={`whitespace-pre-wrap text-sm leading-relaxed ${resultFormat === "json" ? "font-mono" : "font-sans"}`}>{result.output}</pre>
                 </div>
               </div>
             ))}

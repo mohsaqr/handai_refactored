@@ -11,7 +11,7 @@ import { useSystemSettings } from "@/lib/hooks";
 import { useBatchProcessor } from "@/hooks/useBatchProcessor";
 import { useRestoreSession } from "@/hooks/useRestoreSession";
 import { useProcessingStore } from "@/lib/processing-store";
-import { HelpCircle, Plus, X, RotateCcw, Loader2, Sparkles } from "lucide-react";
+import { HelpCircle, Plus, X, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { dispatchConsensusRow } from "@/lib/llm-dispatch";
 import { ConsensusUpload, type FileStatus } from "./ConsensusUpload";
@@ -20,35 +20,16 @@ import { useColumnSelection } from "@/hooks/useColumnSelection";
 import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection";
 import type { FileState } from "@/types";
 import { extractTextBrowser } from "@/lib/document-browser";
-import { SAMPLE_DATASETS } from "@/lib/sample-data";
-import Papa from "papaparse";
-import * as XLSX from "xlsx";
+import { SAMPLE_DATASETS, sampleAsFile } from "@/lib/sample-data";
+import { parseStructuredFile } from "@/lib/parse-file";
+import { useFilesRef, fileKey } from "@/hooks/useFilesRef";
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { ExecutionPanel } from "@/components/tools/ExecutionPanel";
+import { SingleRunButton } from "@/components/tools/SingleRunButton";
 import { ResultsPanel } from "@/components/tools/ResultsPanel";
 
 type Row = Record<string, unknown>;
-
-const fileKey = (f: File) => `${f.name}__${f.size}`;
-
-async function parseStructured(file: File): Promise<Row[] | null> {
-  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-  try {
-    if (ext === "csv") {
-      const text = await file.text();
-      return Papa.parse<Row>(text, { header: true, skipEmptyLines: true }).data;
-    }
-    if (ext === "xlsx" || ext === "xls") {
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: "array" });
-      return XLSX.utils.sheet_to_json<Row>(wb.Sheets[wb.SheetNames[0]]);
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
 
 const DEFAULT_WORKER_PROMPT = `You are an independent coder in an inter-rater reliability study. Code this text based on the instructions.
 
@@ -134,7 +115,7 @@ function WorkerCard({ label, cfg, setCfg, enabledProviders }: {
 
 export default function ConsensusCoderPage() {
   const [fileStates, setFileStates] = useSessionState<FileState[]>("consensus_fileStates", []);
-  const filesRef = useRef<Map<string, File>>(new Map());
+  const filesRef = useFilesRef();
   const [previewRows, setPreviewRows] = useState<Row[] | null>(null);
 
   // File objects can't survive a reload; drop any persisted entry whose File is gone.
@@ -189,15 +170,13 @@ export default function ConsensusCoderPage() {
   const previewColumns = previewRows && previewRows.length > 0 ? Object.keys(previewRows[0]) : [];
   const { selectedCols, toggleCol, toggleAll } = useColumnSelection("consensus_selectedCols", previewColumns);
 
+  type RunMode = "structured" | "unstructured" | "single";
+  const runMode: RunMode = hasStructuredFile ? "structured" : hasUnstructuredFile ? "unstructured" : "single";
+
   const data: Row[] = useMemo(() => {
-    if (!hasFile) return [{ _single: true }];
-    const fs = fileStates[0];
-    const fKey = fileKey(fs.file);
-    if (hasStructuredFile && previewRows) {
-      return previewRows.map((r, i) => ({ ...r, _fileKey: fKey, _rowIdx: i }));
-    }
-    return [{ _unstructured: true, _fileKey: fKey, document_name: fs.file.name }];
-  }, [hasFile, hasStructuredFile, fileStates, previewRows]);
+    if (runMode === "structured" && previewRows) return previewRows;
+    return [{}];
+  }, [runMode, previewRows]);
 
   const dataName = hasFile ? fileStates[0].file.name : "single-run";
 
@@ -297,20 +276,17 @@ export default function ConsensusCoderPage() {
       let userContent = "";
       let documentName = "";
 
-      if (row._single) {
+      if (runMode === "single") {
         userContent = "";
-      } else if (row._unstructured) {
-        const fKey = row._fileKey as string;
-        const file = filesRef.current.get(fKey);
-        if (!file) throw new Error(`File not found: ${row.document_name}`);
+      } else if (runMode === "unstructured") {
+        const file = fileStates[0]?.file;
+        if (!file) throw new Error("File not found");
         documentName = file.name;
         const { text } = await extractTextBrowser(file);
         if (!text.trim()) throw new Error("No text extracted from file");
         userContent = text;
       } else {
-        const cols = selectedCols.length > 0
-          ? selectedCols
-          : Object.keys(row).filter((k) => !k.startsWith("_"));
+        const cols = selectedCols.length > 0 ? selectedCols : Object.keys(row);
         const subset: Row = {};
         for (const c of cols) subset[c] = row[c];
         userContent = JSON.stringify(subset);
@@ -341,15 +317,12 @@ export default function ConsensusCoderPage() {
       }
 
       let baseRow: Row;
-      if (row._single) {
+      if (runMode === "single") {
         baseRow = { prompt: workerPrompt.trim() };
-      } else if (row._unstructured) {
+      } else if (runMode === "unstructured") {
         baseRow = { document_name: documentName };
       } else {
-        baseRow = {};
-        for (const [k, v] of Object.entries(row)) {
-          if (!k.startsWith("_")) baseRow[k] = v;
-        }
+        baseRow = row;
       }
 
       return {
@@ -457,18 +430,15 @@ export default function ConsensusCoderPage() {
   const handleDrop = useCallback(async (accepted: File[]) => {
     const file = accepted[0];
     if (!file) return;
-    const rows = await parseStructured(file);
-    adoptFile(file, rows);
+    const rows = await parseStructuredFile(file);
+    adoptFile(file, rows as Row[] | null);
   }, [adoptFile]);
 
   const handleLoadSample = useCallback((key: string) => {
-    const ds = SAMPLE_DATASETS[key];
-    if (!ds) return;
-    const rows = ds.data as Row[];
-    const csv = Papa.unparse(rows as Record<string, unknown>[]);
-    const fileName = `${ds.name.replace(/\s+/g, "_").toLowerCase()}.csv`;
-    adoptFile(new File([csv], fileName, { type: "text/csv" }), rows);
-    toast.success(`Loaded sample: ${ds.name}`);
+    const made = sampleAsFile(key);
+    if (!made) return;
+    adoptFile(made.file, made.rows as Row[]);
+    toast.success(`Loaded sample: ${SAMPLE_DATASETS[key].name}`);
   }, [adoptFile]);
 
   const handleClearFile = useCallback(() => {
@@ -676,40 +646,14 @@ export default function ConsensusCoderPage() {
             skippedCount={batch.skippedCount}
           />
         ) : (
-          <div className="space-y-3">
-            {batch.isProcessing && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="font-medium">
-                    {batch.aborting ? "Aborting…" : "Processing…"}
-                  </span>
-                  <Button variant="outline" size="sm" onClick={batch.abort} disabled={batch.aborting}>
-                    Stop
-                  </Button>
-                </div>
-                <div className="w-full bg-muted rounded-full h-2.5 overflow-hidden">
-                  <div className={`${batch.aborting ? "bg-amber-400" : "bg-black dark:bg-white"} h-full animate-pulse`} style={{ width: "60%" }} />
-                </div>
-              </div>
-            )}
-            <Button
-              size="lg"
-              className="w-full h-12 text-base bg-red-500 hover:bg-red-600 text-white"
-              disabled={batch.isProcessing || (isSingleRun && !workerPrompt.trim())}
-              onClick={() => batch.run("full")}
-            >
-              {batch.isProcessing ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Sparkles className="h-4 w-4 mr-2" />
-              )}
-              {batch.isProcessing
-                ? "Processing…"
-                : hasUnstructuredFile
-                ? "Process file"
-                : "Run"}
-            </Button>
-          </div>
+          <SingleRunButton
+            label={hasUnstructuredFile ? "Process file" : "Run"}
+            isProcessing={batch.isProcessing}
+            aborting={batch.aborting}
+            disabled={isSingleRun && !workerPrompt.trim()}
+            onRun={() => batch.run("full")}
+            onAbort={batch.abort}
+          />
         )}
       </div>
 

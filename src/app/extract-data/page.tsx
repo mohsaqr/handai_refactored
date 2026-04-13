@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useState, useCallback, useRef, useMemo } from "react";
+import React, { useState, useCallback, useMemo, useEffect } from "react";
+import { useFilesRef, useFileStatuses, fileKey } from "@/hooks/useFilesRef";
 import { useDropzone } from "react-dropzone";
-import { DataTable, ExportDropdown } from "@/components/tools/DataTable";
+// DataTable and ExportDropdown are used internally by ResultsPanel
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -19,6 +20,8 @@ import { AIInstructionsSection } from "@/components/tools/AIInstructionsSection"
 import { useAIInstructions, AI_INSTRUCTIONS_MARKER } from "@/hooks/useAIInstructions";
 import { useSessionState, clearSessionKeys } from "@/hooks/useSessionState";
 import { useBatchProcessor } from "@/hooks/useBatchProcessor";
+import { useRestoreSession } from "@/hooks/useRestoreSession";
+import { useProcessingStore } from "@/lib/processing-store";
 import { ExecutionPanel } from "@/components/tools/ExecutionPanel";
 import { ResultsPanel } from "@/components/tools/ResultsPanel";
 import {
@@ -34,17 +37,23 @@ import {
   RotateCcw,
   ArrowUp,
   ArrowDown,
+  Download,
+  ClipboardPaste,
+  Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { FieldDef, FileState } from "@/types";
 import { dispatchDocumentExtract, dispatchDocumentAnalyze } from "@/lib/llm-dispatch";
 import { getPrompt, formatExtractionSchema } from "@/lib/prompts";
+import { FileUploader } from "@/components/tools/FileUploader";
+import { Textarea } from "@/components/ui/textarea";
+import * as XLSX from "xlsx";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 type Row = Record<string, unknown>;
 
-const FIELD_TYPES: FieldDef["type"][] = ["text", "number", "date", "boolean", "list"];
+const FIELD_TYPES: FieldDef["type"][] = ["text", "number"];
 
 const SAMPLE_EXTRACTION_PROMPTS: Record<string, string> = {
   "Invoice details": "Extract invoice details: invoice number, date, vendor name, line items with quantities and prices, and total amount.",
@@ -74,10 +83,17 @@ export default function ExtractDataPage() {
 
   // ── Section 1: Documents
   const [fileStates, setFileStates] = useSessionState<FileState[]>("extractdata_fileStates", []);
-  // File objects can't be serialized — keep them in a ref keyed by name+size
-  const filesRef = useRef<Map<string, File>>(new Map());
+  const filesRef = useFilesRef();
 
-  const fileKey = (f: File) => `${f.name}__${f.size}`;
+  // File objects can't survive a reload; drop persisted entries whose files are gone.
+  useEffect(() => {
+    setFileStates((prev) => {
+      if (prev.length === 0) return prev;
+      const valid = prev.filter((fs) => filesRef.current.has(fileKey(fs.file)));
+      return valid.length === prev.length ? prev : valid;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Section 2: Describe Data
   const [customPrompt, setCustomPrompt] = useSessionState("extractdata_customPrompt", "");
@@ -90,6 +106,10 @@ export default function ExtractDataPage() {
   ]);
   const [analyzing, setAnalyzing] = useState(false);
   const [hasSuggestedOnce, setHasSuggestedOnce] = useSessionState("extractdata_hasSuggestedOnce", false);
+  const [columnMode, setColumnMode] = useState<"suggest" | "file" | "paste">("suggest");
+  const [fileExtracted, setFileExtracted] = useState(false);
+  const [pasteExtracted, setPasteExtracted] = useState(false);
+  const [csvPasteText, setCsvPasteText] = useState("");
 
   // ── Column helpers ──
   const updateField = useCallback((idx: number, updates: Partial<FieldDef>) => {
@@ -113,6 +133,47 @@ export default function ExtractDataPage() {
       return next;
     });
   }, [setFields]);
+
+  // ── Import from CSV/Excel ───────────────────────────────────────────────────
+  const handleTemplateFile = useCallback((rows: Record<string, unknown>[]) => {
+    if (rows.length === 0) return toast.error("File appears empty");
+    const keys = Object.keys(rows[0]);
+    const nameCol = keys.find((k) => /^(column_?name|name|field|col)/i.test(k)) || keys[0];
+    const typeCol = keys.find((k) => /^type/i.test(k));
+    const descCol = keys.find((k) => /^desc/i.test(k));
+    const imported: FieldDef[] = rows.map((r) => ({
+      name: String(r[nameCol] ?? "").trim(),
+      type: (typeCol && FIELD_TYPES.includes(String(r[typeCol]).toLowerCase() as FieldDef["type"])
+        ? String(r[typeCol]).toLowerCase() as FieldDef["type"]
+        : "text"),
+      description: descCol ? String(r[descCol] ?? "") : "",
+    })).filter((f) => f.name);
+    if (imported.length === 0) return toast.error("No columns found in file");
+    setFields(imported);
+    setFileExtracted(true);
+    toast.success(`${imported.length} columns imported`);
+  }, [setFields]);
+
+  // ── Extract from pasted CSV ───────────────────────────────────────────────
+  const extractFromPastedCsv = useCallback(() => {
+    const lines = csvPasteText.trim().split("\n").filter((l) => l.trim());
+    if (lines.length === 0) return toast.error("No content to parse");
+    const parsed: FieldDef[] = [];
+    for (const line of lines) {
+      const parts = line.split(",").map((s) => s.trim());
+      if (parts.length === 0 || !parts[0]) continue;
+      const name = parts[0];
+      const rawType = (parts[1] || "").toLowerCase();
+      const type = FIELD_TYPES.includes(rawType as FieldDef["type"]) ? rawType as FieldDef["type"] : "text";
+      const description = parts.slice(2).join(", ");
+      parsed.push({ name, type, description });
+    }
+    if (parsed.length === 0) return toast.error("No columns found. Use format: column_name, type, description");
+    setFields(parsed);
+    setCsvPasteText("");
+    setPasteExtracted(true);
+    toast.success(`${parsed.length} columns extracted`);
+  }, [csvPasteText, setFields]);
 
   // ── Auto-generate AI Instructions ──────────────────────────────────────────
   const buildAutoInstructions = useCallback(() => {
@@ -177,7 +238,7 @@ export default function ExtractDataPage() {
         ...valid.map((f): FileState => ({ file: f, status: "pending" })),
       ]);
     },
-    [setFileStates]
+    [setFileStates, filesRef]
   );
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -273,11 +334,8 @@ export default function ExtractDataPage() {
       });
 
       const latency = Date.now() - t0;
-      // Flatten first record into the row; store all records as JSON for full export
-      const firstRecord = result.records?.[0] ?? {};
       return {
         document_name: file.name,
-        ...firstRecord,
         _all_records: JSON.stringify(result.records ?? []),
         _record_count: result.count,
         status: "success",
@@ -295,18 +353,7 @@ export default function ExtractDataPage() {
     onComplete: () => {},
   });
 
-  // ── Derive file statuses from batch results ───────────────────────────────
-  const fileStatuses = useMemo(() => {
-    if (!batch.results.length) return fileStates.map((fs) => fs.status);
-    return fileStates.map((_, i) => {
-      const r = batch.results[i];
-      if (!r) return "pending" as const;
-      if (r.status === "error") return "error" as const;
-      if (r.status === "skipped") return "pending" as const;
-      if (r.status === "success") return "done" as const;
-      return "pending" as const;
-    });
-  }, [batch.results, fileStates]);
+  const fileStatuses = useFileStatuses(fileStates, batch.results);
 
   // ── Build flat table from all records ─────────────────────────────────────
   const allResults: Row[] = useMemo(() => {
@@ -314,9 +361,23 @@ export default function ExtractDataPage() {
     for (const r of batch.results) {
       if (r.status !== "success" || !r._all_records) continue;
       try {
-        const records = JSON.parse(r._all_records as string) as Row[];
+        let records = JSON.parse(r._all_records as string) as Row[];
+        // Detect pattern where LLM returns one field per object instead of one record
+        // e.g. [{full_name: "..."}, {birth_year: "..."}] → merge into [{full_name: "...", birth_year: "..."}]
+        if (records.length > 1 && records.every((rec) => Object.keys(rec).length === 1)) {
+          const merged: Row = {};
+          for (const rec of records) Object.assign(merged, rec);
+          records = [merged];
+        }
         for (const rec of records) {
-          rows.push({ document_name: r.document_name, ...rec });
+          // Clean record: remove keys that are clearly not field data
+          const clean: Row = { document_name: r.document_name };
+          for (const [k, v] of Object.entries(rec)) {
+            if (k && k.length > 1 && !k.startsWith("_") && v !== undefined) {
+              clean[k] = v;
+            }
+          }
+          rows.push(clean);
         }
       } catch {
         // skip unparseable
@@ -324,6 +385,57 @@ export default function ExtractDataPage() {
     }
     return rows;
   }, [batch.results]);
+
+  // ── Session restore from history ───────────────────────────────────────────
+  const restored = useRestoreSession("extract-data");
+  useEffect(() => {
+    if (!restored) return;
+    queueMicrotask(() => {
+      const fullPrompt = restored.systemPrompt ?? "";
+
+      // Restore extraction prompt
+      const descMatch = fullPrompt.match(/EXTRACTION DESCRIPTION:\n([\s\S]*?)(?:\n\n|$)/);
+      if (descMatch) setCustomPrompt(descMatch[1].trim());
+
+      // Restore fields from system prompt
+      const fieldsMatch = fullPrompt.match(/FIELDS TO EXTRACT:\n([\s\S]*?)(?:\n\n|$)/);
+      if (fieldsMatch) {
+        const parsed: FieldDef[] = fieldsMatch[1]
+          .split("\n")
+          .map((l) => l.replace(/^- /, "").trim())
+          .filter(Boolean)
+          .map((l) => {
+            const m = l.match(/^(.+?)\s*\((\w+)\)(?::\s*(.*))?$/);
+            if (!m) return { name: l, type: "text" as const, description: "" };
+            return {
+              name: m[1].trim(),
+              type: FIELD_TYPES.includes(m[2] as FieldDef["type"]) ? m[2] as FieldDef["type"] : "text" as const,
+              description: m[3]?.trim() || "",
+            };
+          });
+        if (parsed.length > 0) setFields(parsed);
+      }
+
+      // Restore file list as placeholder entries (actual File objects can't be serialized)
+      const placeholderFiles: FileState[] = restored.data.map((row) => {
+        const name = (row.document_name as string) || "document";
+        const placeholder = new File([], name);
+        filesRef.current.set(fileKey(placeholder), placeholder);
+        return { file: placeholder, status: "done" as const };
+      });
+      setFileStates(placeholderFiles);
+
+      // Populate results in global processing store
+      const errors = restored.results.filter((r) => r.status === "error").length;
+      useProcessingStore.getState().completeJob(
+        "/extract-data",
+        restored.results,
+        { success: restored.results.length - errors, errors, avgLatency: 0 },
+        restored.runId,
+      );
+      toast.success(`Restored session from "${restored.dataName}" (${restored.data.length} rows)`);
+    });
+  }, [restored]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -337,11 +449,9 @@ export default function ExtractDataPage() {
             Extract structured tabular data from documents using AI
           </p>
         </div>
-        {fileStates.length > 0 && (
-          <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("extractdata_"); batch.clearResults(); filesRef.current.clear(); setFileStates([]); setCustomPrompt(""); setFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]); setHasSuggestedOnce(false); setAiInstructions(""); }}>
+        <Button variant="destructive" className="gap-2 px-5" onClick={() => { clearSessionKeys("extractdata_"); batch.clearResults(); filesRef.current.clear(); setFileStates([]); setCustomPrompt(""); setFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]); setHasSuggestedOnce(false); setAiInstructions(""); setColumnMode("suggest"); setFileExtracted(false); setPasteExtracted(false); setCsvPasteText(""); }}>
             <RotateCcw className="h-3.5 w-3.5" /> Start Over
           </Button>
-        )}
       </div>
 
       <div className={batch.isProcessing ? "pointer-events-none opacity-60" : ""}>
@@ -448,91 +558,222 @@ export default function ExtractDataPage() {
           Define your output columns. Use AI to suggest columns from your document, or add them manually.
         </p>
 
-        <div className="flex gap-2">
-          {hasSuggestedOnce ? (
-            <Button variant="outline" size="sm" className="text-xs" onClick={suggestFields} disabled={analyzing}>
-              {analyzing ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />}
-              Regenerate with AI
-            </Button>
-          ) : (
-            <Button variant="outline" size="sm" className="text-xs" onClick={suggestFields} disabled={analyzing}>
-              {analyzing ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />}
-              Suggest with AI
-            </Button>
-          )}
+        <div className="flex gap-2 flex-wrap">
+          <Button variant={columnMode === "suggest" ? "default" : "outline"} size="sm" className="text-xs" onClick={() => setColumnMode("suggest")}>
+            <Sparkles className="h-3.5 w-3.5 mr-1.5" /> Suggest with AI
+          </Button>
+          <Button variant={columnMode === "paste" ? "default" : "outline"} size="sm" className="text-xs" onClick={() => setColumnMode("paste")}>
+            <ClipboardPaste className="h-3.5 w-3.5 mr-1.5" /> Type CSV
+          </Button>
+          <Button variant={columnMode === "file" ? "default" : "outline"} size="sm" className="text-xs" onClick={() => setColumnMode("file")}>
+            <Upload className="h-3.5 w-3.5 mr-1.5" /> Import CSV/Excel
+          </Button>
+          <Button variant="outline" size="sm" className="text-xs" onClick={() => {
+            const named = fields.filter((f) => f.name.trim());
+            const rows = named.length > 0
+              ? named.map((f) => ({ column_name: f.name, type: f.type, description: f.description || "" }))
+              : [{ column_name: "", type: "", description: "" }];
+            const ws = XLSX.utils.json_to_sheet(rows, { header: ["column_name", "type", "description"] });
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Schema");
+            XLSX.writeFile(wb, "column_schema.xlsx");
+          }}>
+            <Download className="h-3.5 w-3.5 mr-1.5" /> Export Excel
+          </Button>
         </div>
 
-        {analyzing && (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Analyzing document for field suggestions...
-          </div>
-        )}
-
-        <div className="border rounded-lg overflow-hidden">
-          <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Column Schema</div>
-          <div className="p-3 space-y-2">
-            {fields.map((field, idx) => (
-              <div key={idx} className="flex gap-2 items-center">
-                <div className="flex flex-col shrink-0">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-4 w-6 text-muted-foreground hover:text-foreground"
-                    onClick={() => moveField(idx, -1)}
-                    disabled={idx === 0}
-                  >
-                    <ArrowUp className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-4 w-6 text-muted-foreground hover:text-foreground"
-                    onClick={() => moveField(idx, 1)}
-                    disabled={idx === fields.length - 1}
-                  >
-                    <ArrowDown className="h-3 w-3" />
-                  </Button>
-                </div>
-                <Input
-                  placeholder="column_name"
-                  value={field.name}
-                  onChange={(e) => updateField(idx, { name: e.target.value })}
-                  className="flex-1 h-8 text-xs"
-                />
-                <Select
-                  value={field.type}
-                  onValueChange={(v) => updateField(idx, { type: v as FieldDef["type"] })}
-                >
-                  <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {FIELD_TYPES.map((t) => (
-                      <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Input
-                  placeholder="Description (optional)"
-                  value={field.description || ""}
-                  onChange={(e) => updateField(idx, { description: e.target.value })}
-                  className="flex-1 h-8 text-xs"
-                />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0"
-                  onClick={() => removeField(idx)}
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
+        {/* ── Suggest with AI mode ── */}
+        {columnMode === "suggest" && (
+          <>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" className="text-xs" onClick={suggestFields} disabled={analyzing}>
+                {analyzing ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1.5" />}
+                {hasSuggestedOnce ? "Retry AI" : "Ask AI"}
+              </Button>
+              {analyzing && <span className="text-xs text-muted-foreground">Analyzing document for field suggestions...</span>}
+            </div>
+            <div className="border rounded-lg overflow-hidden">
+              <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Column Schema</div>
+              <div className="px-3 pt-2 flex gap-2 items-center text-xs font-medium text-muted-foreground">
+                <div className="shrink-0 w-6" />
+                <div className="flex-1">column_name</div>
+                <div className="w-28">type</div>
+                <div className="flex-1">description</div>
+                <div className="w-8 shrink-0" />
+              </div>
+              <div className="p-3 space-y-2">
+                {fields.map((field, idx) => (
+                  <div key={idx} className="flex gap-2 items-center">
+                    <div className="flex flex-col shrink-0">
+                      <Button variant="ghost" size="icon" className="h-4 w-6 text-muted-foreground hover:text-foreground" onClick={() => moveField(idx, -1)} disabled={idx === 0}>
+                        <ArrowUp className="h-3 w-3" />
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-4 w-6 text-muted-foreground hover:text-foreground" onClick={() => moveField(idx, 1)} disabled={idx === fields.length - 1}>
+                        <ArrowDown className="h-3 w-3" />
+                      </Button>
+                    </div>
+                    <Input placeholder="column_name" value={field.name} onChange={(e) => updateField(idx, { name: e.target.value })} className="flex-1 h-8 text-xs" />
+                    <Select value={field.type} onValueChange={(v) => updateField(idx, { type: v as FieldDef["type"] })}>
+                      <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {FIELD_TYPES.map((t) => (<SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>))}
+                      </SelectContent>
+                    </Select>
+                    <Input placeholder="Description (optional)" value={field.description || ""} onChange={(e) => updateField(idx, { description: e.target.value })} className="flex-1 h-8 text-xs" />
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0" onClick={() => removeField(idx)}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+              <div className="px-3 pb-3 flex gap-2">
+                <Button variant="outline" size="sm" className="flex-1 text-xs" onClick={addField}>
+                  <Plus className="h-3 w-3 mr-2" /> Add Column
+                </Button>
+                <Button variant="outline" size="sm" className="text-xs text-destructive hover:bg-destructive/10" onClick={() => setFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }])}>
+                  <Trash2 className="h-3 w-3 mr-2" /> Clear All
                 </Button>
               </div>
-            ))}
+            </div>
+          </>
+        )}
+
+        {/* ── Import CSV/Excel mode ── */}
+        {columnMode === "file" && !fileExtracted && !fields.some((f) => f.name.trim()) && (
+          <div className="max-w-md">
+            <FileUploader
+              onDataLoaded={handleTemplateFile}
+              accept={{
+                "text/csv": [".csv"],
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+                "application/vnd.ms-excel": [".xls"],
+              }}
+            />
           </div>
-          <div className="px-3 pb-3">
-            <Button variant="outline" size="sm" className="w-full text-xs" onClick={addField}>
-              <Plus className="h-3 w-3 mr-2" /> Add Column
+        )}
+        {columnMode === "file" && (fileExtracted || fields.some((f) => f.name.trim())) && (
+          <>
+          <Button variant="outline" size="sm" className="text-xs" onClick={() => {
+            setFileExtracted(false);
+            setFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]);
+          }}>
+            <Upload className="h-3.5 w-3.5 mr-1.5" /> {fileExtracted ? "Re-import" : "Import"}
+          </Button>
+          <div className="border rounded-lg overflow-hidden">
+            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Column Schema</div>
+            <div className="px-3 pt-2 flex gap-2 items-center text-xs font-medium text-muted-foreground">
+              <div className="shrink-0 w-6" />
+              <div className="flex-1">column_name</div>
+              <div className="w-28">type</div>
+              <div className="flex-1">description</div>
+              <div className="w-8 shrink-0" />
+            </div>
+            <div className="p-3 space-y-2">
+              {fields.map((field, idx) => (
+                <div key={idx} className="flex gap-2 items-center">
+                  <div className="flex flex-col shrink-0">
+                    <Button variant="ghost" size="icon" className="h-4 w-6 text-muted-foreground hover:text-foreground" onClick={() => moveField(idx, -1)} disabled={idx === 0}>
+                      <ArrowUp className="h-3 w-3" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-4 w-6 text-muted-foreground hover:text-foreground" onClick={() => moveField(idx, 1)} disabled={idx === fields.length - 1}>
+                      <ArrowDown className="h-3 w-3" />
+                    </Button>
+                  </div>
+                  <Input placeholder="column_name" value={field.name} onChange={(e) => updateField(idx, { name: e.target.value })} className="flex-1 h-8 text-xs" />
+                  <Select value={field.type} onValueChange={(v) => updateField(idx, { type: v as FieldDef["type"] })}>
+                    <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FIELD_TYPES.map((t) => (<SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>))}
+                    </SelectContent>
+                  </Select>
+                  <Input placeholder="Description (optional)" value={field.description || ""} onChange={(e) => updateField(idx, { description: e.target.value })} className="flex-1 h-8 text-xs" />
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0" onClick={() => removeField(idx)}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+            <div className="px-3 pb-3 flex gap-2">
+              <Button variant="outline" size="sm" className="flex-1 text-xs" onClick={addField}>
+                <Plus className="h-3 w-3 mr-2" /> Add Column
+              </Button>
+              <Button variant="outline" size="sm" className="text-xs text-destructive hover:bg-destructive/10" onClick={() => setFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }])}>
+                <Trash2 className="h-3 w-3 mr-2" /> Clear All
+              </Button>
+            </div>
+          </div>
+          </>
+        )}
+
+        {/* ── Type CSV mode ── */}
+        {columnMode === "paste" && !pasteExtracted && !fields.some((f) => f.name.trim()) && (
+          <div className="space-y-2">
+            <Textarea
+              placeholder={"One column per line: column_name, type, description\n\nauthor_name, text, full name of the author\npublication_year, number, year published\ntopic, text, main topic"}
+              className="min-h-[100px] text-xs font-mono resize-y"
+              value={csvPasteText}
+              onChange={(e) => setCsvPasteText(e.target.value)}
+            />
+            <Button variant="outline" size="sm" className="text-xs" onClick={extractFromPastedCsv}>
+              Extract Columns
             </Button>
           </div>
-        </div>
+        )}
+        {columnMode === "paste" && (pasteExtracted || fields.some((f) => f.name.trim())) && (
+          <>
+          <Button variant="outline" size="sm" className="text-xs" onClick={() => {
+            const text = fields.filter((f) => f.name.trim()).map((f) => `${f.name}, ${f.type}, ${f.description || ""}`).join("\n");
+            setCsvPasteText(text);
+            setPasteExtracted(false);
+            setFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }]);
+          }}>
+            <Pencil className="h-3.5 w-3.5 mr-1.5" /> Edit
+          </Button>
+          <div className="border rounded-lg overflow-hidden">
+            <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Column Schema</div>
+            <div className="px-3 pt-2 flex gap-2 items-center text-xs font-medium text-muted-foreground">
+              <div className="shrink-0 w-6" />
+              <div className="flex-1">column_name</div>
+              <div className="w-28">type</div>
+              <div className="flex-1">description</div>
+              <div className="w-8 shrink-0" />
+            </div>
+            <div className="p-3 space-y-2">
+              {fields.map((field, idx) => (
+                <div key={idx} className="flex gap-2 items-center">
+                  <div className="flex flex-col shrink-0">
+                    <Button variant="ghost" size="icon" className="h-4 w-6 text-muted-foreground hover:text-foreground" onClick={() => moveField(idx, -1)} disabled={idx === 0}>
+                      <ArrowUp className="h-3 w-3" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-4 w-6 text-muted-foreground hover:text-foreground" onClick={() => moveField(idx, 1)} disabled={idx === fields.length - 1}>
+                      <ArrowDown className="h-3 w-3" />
+                    </Button>
+                  </div>
+                  <Input placeholder="column_name" value={field.name} onChange={(e) => updateField(idx, { name: e.target.value })} className="flex-1 h-8 text-xs" />
+                  <Select value={field.type} onValueChange={(v) => updateField(idx, { type: v as FieldDef["type"] })}>
+                    <SelectTrigger className="w-28 h-8 text-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FIELD_TYPES.map((t) => (<SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>))}
+                    </SelectContent>
+                  </Select>
+                  <Input placeholder="Description (optional)" value={field.description || ""} onChange={(e) => updateField(idx, { description: e.target.value })} className="flex-1 h-8 text-xs" />
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive shrink-0" onClick={() => removeField(idx)}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+            <div className="px-3 pb-3 flex gap-2">
+              <Button variant="outline" size="sm" className="flex-1 text-xs" onClick={addField}>
+                <Plus className="h-3 w-3 mr-2" /> Add Column
+              </Button>
+              <Button variant="outline" size="sm" className="text-xs text-destructive hover:bg-destructive/10" onClick={() => setFields([{ name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }, { name: "", type: "text", description: "" }])}>
+                <Trash2 className="h-3 w-3 mr-2" /> Clear All
+              </Button>
+            </div>
+          </div>
+          </>
+        )}
       </div>
 
       <div className="border-t" />
@@ -574,24 +815,12 @@ export default function ExtractDataPage() {
       </div>
 
       {/* ── Results ─────────────────────────────────────────────────────── */}
-      {allResults.length > 0 && (
-        <div className="space-y-4 border-t pt-6 pb-8">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Extracted Data</h2>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {allResults.length} records from {batch.results.filter((r) => r.status === "success").length} file(s)
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <ExportDropdown data={allResults} filename="extracted_documents" />
-            </div>
-          </div>
-          <div className="border rounded-lg overflow-hidden">
-            <DataTable data={allResults} />
-          </div>
-        </div>
-      )}
+      <ResultsPanel
+        results={allResults}
+        runId={batch.runId}
+        title="Extracted Data"
+        subtitle={`${allResults.length} records from ${batch.results.filter((r) => r.status === "success").length} file(s)`}
+      />
     </div>
   );
 }
