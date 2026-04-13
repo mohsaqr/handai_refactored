@@ -9,6 +9,11 @@ const ProviderFieldsLocal = z.object({
   baseUrl: z.string().optional(),
 });
 
+const LlmTuningFields = {
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().positive().optional(),
+};
+
 // ── /api/process-row ──────────────────────────────────────────────────────────
 export const ProcessRowSchema = z.object({
   provider: z.string().min(1),
@@ -19,8 +24,7 @@ export const ProcessRowSchema = z.object({
   userContent: z.string(),
   rowIdx: z.number().int().optional(),
   runId: z.string().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().positive().optional(),
+  ...LlmTuningFields,
 });
 
 // ── /api/consensus-row ────────────────────────────────────────────────────────
@@ -35,8 +39,7 @@ export const ConsensusRowSchema = z.object({
   enableQualityScoring: z.boolean().optional(),
   enableDisagreementAnalysis: z.boolean().optional(),
   includeReasoning: z.boolean().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().positive().optional(),
+  ...LlmTuningFields,
 });
 
 // ── /api/comparison-row ───────────────────────────────────────────────────────
@@ -52,8 +55,7 @@ export const ComparisonRowSchema = z.object({
   ).min(2),
   systemPrompt: z.string(),
   userContent: z.string(),
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().positive().optional(),
+  ...LlmTuningFields,
 });
 
 // ── /api/ai-agents-row ───────────────────────────────────────────────────────
@@ -74,8 +76,7 @@ export const AgentsRowSchema = z.object({
   maxRounds: z.number().int().min(1).max(10).default(3),
   rowIdx: z.number().int().optional(),
   runId: z.string().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().positive().optional(),
+  ...LlmTuningFields,
 });
 
 // ── /api/automator-row ────────────────────────────────────────────────────────
@@ -99,8 +100,7 @@ export const AutomatorRowSchema = z.object({
   model: z.string().min(1),
   apiKey: z.string().default(""),
   baseUrl: z.string().optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().positive().optional(),
+  ...LlmTuningFields,
 });
 
 // ── /api/generate-row ─────────────────────────────────────────────────────────
@@ -120,8 +120,7 @@ export const GenerateRowSchema = z.object({
   ).optional(),
   freeformPrompt: z.string().optional(),
   outputFormat: z.enum(["tabular", "json", "freetext", "markdown", "gift"]).optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  maxTokens: z.number().int().positive().optional(),
+  ...LlmTuningFields,
 });
 
 // ── Document shared sub-schemas ───────────────────────────────────────────────
@@ -145,7 +144,7 @@ export const DocumentExtractSchema = z.object({
   baseUrl: z.string().optional(),
   systemPrompt: z.string().optional(),
   fields: z.array(FieldDefSchema).optional(),
-  maxTokens: z.number().int().positive().optional(),
+  ...LlmTuningFields,
 });
 
 // ── /api/document-analyze ─────────────────────────────────────────────────────
@@ -170,7 +169,7 @@ export const DocumentProcessSchema = z.object({
   apiKey: z.string().default(""),
   baseUrl: z.string().optional(),
   systemPrompt: z.string().min(1),
-  maxTokens: z.number().int().positive().optional(),
+  ...LlmTuningFields,
 });
 
 // ── /api/runs POST ────────────────────────────────────────────────────────────

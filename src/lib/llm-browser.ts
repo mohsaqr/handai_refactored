@@ -236,21 +236,8 @@ export async function generateRowDirect(params: {
     userPrompt = `${params.freeformPrompt ?? "Generate a realistic dataset"}\nGenerate exactly ${params.rowCount} rows.`;
   }
 
-  const genOpts: Parameters<typeof generateText>[0] = {
-    model: aiModel,
-    system: systemPrompt,
-    prompt: userPrompt,
-  };
-  // Some models (reasoning models like o1/gpt-5-nano) don't support temperature
-  if (params.temperature !== undefined) {
-    try { genOpts.temperature = params.temperature; } catch { /* skip if unsupported */ }
-  }
-  if (params.maxTokens !== undefined && params.maxTokens !== null) {
-    try { genOpts.maxOutputTokens = params.maxTokens; } catch { /* skip if unsupported */ }
-  }
-
   const { text } = await withRetry(
-    () => generateText(genOpts),
+    () => generateText(genOpts(aiModel, systemPrompt, userPrompt, params.temperature, params.maxTokens ?? undefined)),
     { maxAttempts: 3, baseDelayMs: 200 }
   );
 

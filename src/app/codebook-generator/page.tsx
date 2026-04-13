@@ -175,7 +175,7 @@ export default function CodebookGeneratorPage() {
       baseUrl: providerConfig.baseUrl,
       systemPrompt,
       userContent,
-      temperature: systemSettings.temperature || 0.3,
+      temperature: systemSettings.temperature ?? 0.3,
       maxTokens: systemSettings.maxTokens ?? undefined,
     });
     return output;
@@ -295,7 +295,7 @@ export default function CodebookGeneratorPage() {
           runType: "codebook-generator",
           provider: providerConfig.providerId,
           model: providerConfig.defaultModel,
-          temperature: systemSettings.temperature || 0.3,
+          temperature: systemSettings.temperature ?? 0.3,
           systemPrompt: "3-stage codebook pipeline",
           inputFile: dataName || "unnamed",
           inputRows: data.length,
