@@ -1,52 +1,54 @@
-# Session Handoff — 2026-03-27
+# Session Handoff — 2026-04-14
 
 ## Completed
 
-### Navigation & Processing Persistence
-- Sidebar active page highlight + pulsing blue dot for active processing
-- Processing survives navigation via module-level runner in `useBatchProcessor.ts` + Zustand `processing-store.ts`
-- 7 tools converted to `useBatchProcessor`: transform, qualitative-coder, model-comparison, consensus-coder, automator, abstract-screener, ai-coder
-- Resume failed rows without reprocessing (amber "Resume Failed" button)
-- Throttled progress via `requestAnimationFrame` batching; fine-grained selectors
+### Smart Document Chunking for Extract Data + Process Documents
+- Large documents (>10K chars) are automatically split at paragraph boundaries (~8K per chunk)
+- Chunks processed in parallel with `pLimit(3)` concurrency to avoid rate-limit storms
+- No overlap between chunks — clean splits, zero duplicate records
+- Chunk-aware prompts: `[SECTION 2 OF 5] Extract records ONLY from this section...`
+- Falls back to single-newline splits when no paragraph breaks exist (OCR, HTML-to-text)
+- `maxOutputTokens` only sent when user has configured it in Settings (no hardcoded default)
 
-### Session Restore from History
-- "Restore Session" button on history detail page
-- `restore-store.ts` + `useRestoreSession` hook in all tool pages
+### Chunk Failure Handling
+- Failed chunks logged with `console.error` (chunk index, document name, error reason)
+- `failedChunks` count returned in API response alongside `chunks` total
+- Process Documents inserts `[Section N of M: processing failed]` placeholder for gaps
+- Both routes return 422 when all chunks fail (was silently returning 200 OK with empty results)
 
-### Tauri Removal
-- Deleted `db-tauri.ts` and `desktop/tauri/`; zero Tauri references in `src/`
+### 3-Level User Communication
+- **On upload**: Amber "Multi-section" badge on large files in the file list
+- **During processing**: Toast "Processed report.pdf in 4 sections (1 failed)" when chunking occurs
+- **After processing**: Results subtitle "95 records from 3 file(s) (7 sections)"
+- Amber warning banner above Execute section when large files are present
 
-### Browser Storage for Public Deployment
-- `NEXT_PUBLIC_BROWSER_STORAGE=1` → LLM calls + storage run in browser (IndexedDB)
-- API keys stay in browser; local models work from user's machine
-- `DATABASE_URL` fallback in `prisma.ts`
+### Prompt Improvements
+- Added completeness rules 7-8 to extraction prompt: "Extract EVERY matching record... never truncate, summarize, or omit"
+- Both API route and browser-direct mirror have identical prompt text
 
-### Lint Cleanup (78 → 0)
-- All `any` replaced, hooks purity fixed, unused vars removed
-
-### UI
-- DataTable: 10 rows/page, sticky header, 2-line cell clamp
-- "Start Over" on all 10 tools; AI Coder batch exposed with Test (20 rows)
-- Abstract Screener card constrained; codebook accepts Excel; visible input borders
-
-### Transform & Generate
-- Transform: plain text output, originals preserved in `ai_output`
-- Generate: temperature optional, removed output cap, fallback for unparseable
-
-### Prompts
-- Research-grounded (Braun & Clarke, PRISMA, Saldana); multi-coding support
-
-### Docs
-- CLAUDE.md, README.md updated; 45-slide PPTX with citations
+### Test Updates
+- New `src/lib/__tests__/chunk-text.test.ts` — 17 tests (no overlap, paragraph boundaries, single-newline fallback, prompt prefix, isLikelyChunked, constants)
+- Updated `src/lib/__tests__/prompts.test.ts` — prompt count 21→29, generate 5→6 (upstream stale)
 
 ## Current State
-- TS: 0 errors | Lint: 0 errors, 0 warnings | Tests: 115/115 | Build: pass | Git: pushed
+- TS: 0 errors | Lint: 0 warnings | Tests: 131/131 pass
+- New files: `src/lib/chunk-text.ts`, `src/lib/__tests__/chunk-text.test.ts`
+- Modified: `document-extract/route.ts`, `document-process/route.ts`, `llm-browser.ts`, `llm-dispatch.ts`, `extract-data/page.tsx`, `process-documents/page.tsx`, `prompts.test.ts`
+
+## Key Decisions
+- **No overlap**: Overlap caused duplicate records — worse than missing a boundary record. Clean paragraph splits are safer.
+- **pLimit(3) per document**: Balances parallelism vs rate limits. The batch processor already limits file-level concurrency (default 5), so 5 files × 3 chunks = 15 max concurrent LLM calls.
+- **No hardcoded maxOutputTokens**: Removed the 16384 default. Each provider has its own ceiling; chunking is the primary strategy for long output, not a higher token limit.
+- **isLikelyChunked instead of estimateChunks**: The bytes-to-chars ratio varies wildly by file type (text ~1.0, PDF ~0.1). Showing "~4 sections" was misleading. "Multi-section" is honest.
+- **Section separator `---` for process-documents**: Marks where one chunk's analysis ends and the next begins. Failed chunks get `[Section N: processing failed]` placeholder.
 
 ## Open Issues
-- 3 tools not on `useBatchProcessor` (codebook-generator, generate, process-documents)
-- `Row` type duplicated locally in ~9 files
-- 6 research slides appended after Thank You in PPTX — reorder manually
+- Pre-existing code duplication: `extractText()` copied across 3 API routes, `parseCsvResponse`/`tryParseJson` duplicated between route and browser mirror, markdown fence stripping regex repeated 14+ times. Not addressed — out of scope for this change.
+- `withRetry` has no jitter — concurrent retries from multiple chunks can collide at the same backoff intervals
+- 3 tools still not on `useBatchProcessor` (codebook-generator, generate, process-documents)
 
 ## Next Steps
-- Background-safe pattern for remaining 3 tools if needed
-- Dark mode toggle
+- Extract shared `extractText()` server function to `src/lib/extract-text-server.ts`
+- Extract shared `stripCodeFences()` helper to `src/lib/`
+- Add jitter to `withRetry` backoff
+- Consider moving extraction prompts into `src/lib/prompts.ts` registry

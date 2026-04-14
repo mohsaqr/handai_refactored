@@ -3,7 +3,7 @@ import { generateText } from "ai";
 import { getModel } from "@/lib/ai/providers";
 import { withRetry } from "@/lib/retry";
 import { ConsensusRowSchema } from "@/lib/validation";
-import { multiWorkerKappa, pairwiseAgreement } from "@/lib/analytics";
+import { pairwiseJaccard, pairwiseAgreement } from "@/lib/analytics";
 import prisma from "@/lib/prisma";
 
 export async function POST(req: NextRequest) {
@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
     // Step 2: Inter-rater analytics (all workers, set-based)
     const outputs = workerResults.map((r) => r.output.trim());
     const allSame = outputs.every((o) => o === outputs[0]);
-    const kappa = multiWorkerKappa(outputs);
+    const kappa = pairwiseJaccard(outputs);
 
     // Pairwise matrix for detailed view
     const allTokenized = outputs.map((o) =>

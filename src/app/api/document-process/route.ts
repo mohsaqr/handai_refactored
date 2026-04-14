@@ -3,6 +3,8 @@ import { generateText } from "ai";
 import { getModel } from "@/lib/ai/providers";
 import { withRetry } from "@/lib/retry";
 import { DocumentProcessSchema } from "@/lib/validation";
+import { chunkText, chunkPromptPrefix, CHUNK_CONCURRENCY } from "@/lib/chunk-text";
+import pLimit from "p-limit";
 
 // ── Text extraction (reuses same logic as document-extract) ──────────────────
 
@@ -146,22 +148,65 @@ export async function POST(req: NextRequest) {
     }
 
     const aiModel = getModel(provider, model, apiKey, baseUrl);
+    const outputOpts: Record<string, unknown> = {};
+    if (maxTokens) outputOpts.maxOutputTokens = maxTokens;
 
-    const { text } = await withRetry(
-      () =>
-        generateText({
-          model: aiModel,
-          system: systemPrompt,
-          prompt: `Document: ${fileName ?? "untitled"}\n\n${rawText}`,
-          ...(maxTokens ? { maxOutputTokens: maxTokens } : {}),
-        }),
-      { maxAttempts: 3, baseDelayMs: 200 }
-    );
+    const chunks = chunkText(rawText);
+
+    const processChunk = async (chunk: string, chunkIndex: number, chunkTotal: number): Promise<string> => {
+      const prefix = chunkPromptPrefix(chunkIndex, chunkTotal, "process");
+      const { text } = await withRetry(
+        () =>
+          generateText({
+            model: aiModel,
+            system: systemPrompt,
+            prompt: `${prefix}Document: ${fileName ?? "untitled"}\n\n${chunk}`,
+            ...outputOpts,
+          }),
+        { maxAttempts: 3, baseDelayMs: 200 }
+      );
+      return text;
+    };
+
+    let text: string;
+    let failedChunks = 0;
+    const warnings: string[] = [];
+
+    if (chunks.length === 1) {
+      text = await processChunk(rawText, 0, 1);
+    } else {
+      const limit = pLimit(CHUNK_CONCURRENCY);
+      const results = await Promise.allSettled(
+        chunks.map((c) => limit(() => processChunk(c.text, c.index, c.total)))
+      );
+      const parts: string[] = [];
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.status === "fulfilled" && r.value.trim()) {
+          parts.push(r.value);
+        } else if (r.status === "rejected") {
+          failedChunks++;
+          const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
+          console.error(`document-process: chunk ${i + 1}/${chunks.length} failed for "${fileName}": ${reason}`);
+          parts.push(`[Section ${i + 1} of ${chunks.length}: processing failed]`);
+        }
+      }
+      text = parts.join("\n\n---\n\n");
+      if (failedChunks > 0) {
+        warnings.push(`${failedChunks} of ${chunks.length} sections failed`);
+      }
+    }
+
+    if (!text.trim()) {
+      return NextResponse.json({ error: "Processing produced no output for any section." }, { status: 422 });
+    }
 
     return NextResponse.json({
       text,
       fileName: fileName ?? "untitled",
       charCount,
+      chunks: chunks.length, failedChunks,
+      ...(warnings.length > 0 ? { warnings } : {}),
       truncated,
     });
   } catch (error: unknown) {

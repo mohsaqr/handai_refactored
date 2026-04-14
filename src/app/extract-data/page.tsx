@@ -47,6 +47,7 @@ import { dispatchDocumentExtract, dispatchDocumentAnalyze } from "@/lib/llm-disp
 import { getPrompt, formatExtractionSchema } from "@/lib/prompts";
 import { FileUploader } from "@/components/tools/FileUploader";
 import { Textarea } from "@/components/ui/textarea";
+import { LARGE_FILE_BYTES, isLikelyChunked } from "@/lib/chunk-text";
 import * as XLSX from "xlsx";
 import pLimit from "p-limit";
 
@@ -353,10 +354,17 @@ export default function ExtractDataPage() {
       });
 
       const latency = Date.now() - t0;
+      if (result.chunks > 1) {
+        const msg = result.failedChunks > 0
+          ? `Processed ${file.name} in ${result.chunks} sections (${result.failedChunks} failed)`
+          : `Processed ${file.name} in ${result.chunks} sections`;
+        toast.info(msg);
+      }
       return {
         document_name: file.name,
         _all_records: JSON.stringify(result.records ?? []),
         _record_count: result.count,
+        _chunk_count: result.chunks,
         status: "success",
         latency_ms: latency,
       };
@@ -456,7 +464,11 @@ export default function ExtractDataPage() {
     });
   }, [restored]);
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  const successFiles = batch.results.filter((r) => r.status === "success").length;
+  const totalChunks = batch.results.reduce((sum, r) => sum + (Number(r._chunk_count) || 1), 0);
+  const chunkNote = totalChunks > successFiles ? ` (${totalChunks} sections)` : "";
+  const extractSubtitle = `${allResults.length} records from ${successFiles} file(s)${chunkNote}`;
+
   return (
     <div className="space-y-0 pb-16">
 
@@ -524,7 +536,12 @@ export default function ExtractDataPage() {
                       </span>
                     )}
 
-                    {status === "pending" && (
+                    {status === "pending" && isLikelyChunked(entry.file.size) && (
+                      <span className="text-[10px] text-amber-600 dark:text-amber-400 shrink-0" title="This file will be split into sections for complete extraction">
+                        Multi-section
+                      </span>
+                    )}
+                    {status === "pending" && !isLikelyChunked(entry.file.size) && (
                       <span className="text-[10px] text-muted-foreground shrink-0">Pending</span>
                     )}
                     {(status === "extracting" || status === "analyzing") && (
@@ -819,6 +836,17 @@ export default function ExtractDataPage() {
       {/* ── 5. Execute ──────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
         <h2 className="text-2xl font-bold">5. Execute</h2>
+
+        {fileStates.some((fs) => isLikelyChunked(fs.file.size)) && (
+          <div className="flex items-start gap-3 px-4 py-3 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 text-sm text-amber-700 dark:text-amber-300">
+            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+            <span>
+              Some files are large and will be automatically split into sections for complete extraction.
+              This uses additional API calls but ensures no data is missed.
+            </span>
+          </div>
+        )}
+
         <ExecutionPanel
           isProcessing={batch.isProcessing}
           aborting={batch.aborting}
@@ -844,7 +872,7 @@ export default function ExtractDataPage() {
         results={allResults}
         runId={batch.runId}
         title="Extracted Data"
-        subtitle={`${allResults.length} records from ${batch.results.filter((r) => r.status === "success").length} file(s)`}
+        subtitle={extractSubtitle}
       />
     </div>
   );

@@ -84,8 +84,11 @@ export function interpretKappa(k: number): string {
  * For free-form text, the entire output is treated as a single token.
  * Agreement = |intersection| / |union| (Jaccard index), averaged across all pairs.
  * Returns a value in [0, 1]: 0 = no overlap, 1 = identical sets.
+ *
+ * NOTE: This is Jaccard similarity, NOT Cohen's/Fleiss' Kappa. Kappa adjusts for
+ * chance agreement; Jaccard does not. Use the correct label when reporting.
  */
-export function multiWorkerKappa(workerOutputs: string[]): number {
+export function pairwiseJaccard(workerOutputs: string[]): number {
   if (workerOutputs.length < 2) return NaN;
 
   // Tokenize each worker's output into a normalized set

@@ -32,16 +32,14 @@ export const isStatic = process.env.NEXT_PUBLIC_STATIC === "1";
  * True when the app should operate entirely in the browser:
  * - LLM calls go directly from the browser to provider APIs (no server relay)
  * - Run history is stored in IndexedDB (no server SQLite)
+ * - API keys never leave the browser
  *
- * Enabled for:
- * - Static builds (NEXT_PUBLIC_STATIC=1, e.g. GitHub Pages)
- * - Public server deployments (NEXT_PUBLIC_BROWSER_STORAGE=1)
- *
- * This ensures local models (LM Studio, Ollama) work from the user's machine,
- * and API keys never leave the browser.
+ * Defaults to true for security — API keys are not sent through the server.
+ * Set NEXT_PUBLIC_BROWSER_STORAGE=0 explicitly to use server-side API routes
+ * (only for private/self-hosted deployments where the server is trusted).
  */
 export const useBrowserStorage =
-  isStatic || process.env.NEXT_PUBLIC_BROWSER_STORAGE === "1";
+  process.env.NEXT_PUBLIC_BROWSER_STORAGE === "0" ? false : true;
 
 /** True when LLM calls should go through browser-direct path. */
 const useBrowserDirect = useBrowserStorage;
@@ -355,6 +353,8 @@ export async function dispatchDocumentExtract(params: {
   charCount: number;
   truncated: boolean;
   count: number;
+  chunks: number;
+  failedChunks: number;
 }> {
   if (useBrowserDirect) {
     return await documentExtractDirect(params);
@@ -444,6 +444,8 @@ export async function dispatchDocumentProcess(params: {
   fileName: string;
   charCount: number;
   truncated: boolean;
+  chunks: number;
+  failedChunks: number;
 }> {
   if (useBrowserDirect) {
     return await documentProcessDirect(params);

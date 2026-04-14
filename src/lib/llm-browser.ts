@@ -11,9 +11,11 @@
 import { generateText } from "ai";
 import { getModel } from "./ai/providers";
 import { withRetry } from "./retry";
-import { multiWorkerKappa, pairwiseAgreement } from "./analytics";
+import { pairwiseJaccard, pairwiseAgreement, interpretKappa } from "./analytics";
 import { getPrompt, formatExtractionSchema, formatExtractionSchemaJson } from "./prompts";
 import type { FieldDef } from "@/types";
+import { chunkText, chunkPromptPrefix, CHUNK_CONCURRENCY } from "./chunk-text";
+import pLimit from "p-limit";
 
 /** Build generateText options — only includes temperature when explicitly provided (reasoning models reject it). */
 function genOpts(model: ReturnType<typeof getModel>, system: string, prompt: string, temperature?: number, maxOutputTokens?: number): Parameters<typeof generateText>[0] {
@@ -337,7 +339,7 @@ export async function consensusRowDirect(params: {
   // Step 2: Inter-rater analytics (all workers, set-based)
   const outputs = workerResults.map((r) => r.output.trim());
   const allSame = outputs.every((o) => o === outputs[0]);
-  const kappa = multiWorkerKappa(outputs);
+  const kappa = pairwiseJaccard(outputs);
 
   const allTokenized = outputs.map((o) =>
     o.split(/[,\n]+/).map((s) => s.trim()).filter(Boolean)
@@ -490,13 +492,7 @@ Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is a decimal number
     judgeLatency,
     consensusType,
     kappa: isNaN(kappa) ? null : kappa,
-    kappaLabel: isNaN(kappa)
-      ? "N/A"
-      : kappa < 0.2 ? "Very Low"
-      : kappa < 0.4 ? "Low"
-      : kappa < 0.6 ? "Moderate"
-      : kappa < 0.8 ? "High"
-      : "Very High",
+    kappaLabel: interpretKappa(kappa),
     agreementMatrix,
     ...(judgeReasoning !== undefined ? { judgeReasoning } : {}),
     ...(qualityScores !== undefined ? { qualityScores } : {}),
@@ -620,6 +616,8 @@ export async function documentExtractDirect(params: {
   charCount: number;
   truncated: boolean;
   count: number;
+  chunks: number;
+  failedChunks: number;
 }> {
   const { extractTextBrowser } = await import("./document-browser");
   const { text: rawText, truncated, charCount } = await extractTextBrowser(params.file);
@@ -651,46 +649,16 @@ ABSOLUTE RULES:
 3. Do NOT write a summary of the document — extract the actual field values.
 4. If a field value is not present in the document, use null (not an empty string, not "N/A").
 5. If the document contains NO relevant data at all, return exactly: []
-6. Always wrap records in an array, even when there is only one: [{ ... }]`;
+6. Always wrap records in an array, even when there is only one: [{ ... }]
+7. Extract EVERY matching record — there may be dozens or hundreds. Do NOT stop after a sample or subset.
+8. Completeness is critical. A long document must produce a long output. Never truncate, summarize, or omit records.`;
   } else {
     effectivePrompt = params.systemPrompt ?? DEFAULT_EXTRACT_PROMPT;
   }
 
   const aiModel = getModel(params.provider, params.model, params.apiKey, params.baseUrl);
-
-  const { text } = await withRetry(
-    () => generateText(genOpts(aiModel, effectivePrompt, `Document: ${params.file.name}\n\n${rawText}`, undefined, params.maxTokens)),
-    { maxAttempts: 3, baseDelayMs: 200 }
-  );
-
-  // When fields are defined the prompt asks for JSON, so try JSON first.
-  // When no fields are defined the prompt asks for CSV, so try CSV first.
-  let records: Record<string, unknown>[] = [];
-  let cleaned = text.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
-
-  // Reformat pass — if the first attempt produced prose instead of JSON, feed
-  // it back to the model and ask it to convert to the required schema.
-  const reformatToJson = async (proseText: string): Promise<string> => {
-    if (!params.fields || params.fields.length === 0) return proseText;
-    const fieldList = params.fields
-      .map((f) => `- "${f.name}" (${f.type})${f.description ? ": " + f.description : ""}`)
-      .join("\n");
-    const reformatPrompt = `You are a JSON reformatter. You will receive text (possibly prose, markdown, or a summary) that describes data. Extract the requested fields from it and return ONLY a JSON array of records.
-
-REQUIRED FIELDS:
-${fieldList}
-
-RULES:
-1. Output MUST start with "[" and end with "]". Nothing else.
-2. No prose, no markdown, no explanations.
-3. Use null for missing values.
-4. If the text describes one subject, return [{ ... }]. If multiple, return one object per subject.`;
-    const { text: reformatted } = await withRetry(
-      () => generateText(genOpts(aiModel, reformatPrompt, proseText, undefined, params.maxTokens)),
-      { maxAttempts: 2, baseDelayMs: 200 }
-    );
-    return reformatted;
-  };
+  const outputOpts: Record<string, unknown> = {};
+  if (params.maxTokens) outputOpts.maxOutputTokens = params.maxTokens;
 
   const tryJson = (src: string): Record<string, unknown>[] => {
     try {
@@ -708,31 +676,73 @@ RULES:
     }
   };
 
-  if (params.fields && params.fields.length > 0) {
-    // JSON-first path (fields defined → prompt asked for JSON)
-    records = tryJson(cleaned);
-    if (records.length === 0) records = parseCsv(text);
-    if (records.length === 0) {
-      // Reformat-retry: the model produced prose. Feed it back and ask for JSON.
-      const reformatted = await reformatToJson(text);
-      cleaned = reformatted.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
-      records = tryJson(cleaned);
+  // ── Helper: extract records from a single chunk of text ────────────
+  const extractChunk = async (chunk: string, chunkIndex: number, chunkTotal: number): Promise<Record<string, unknown>[]> => {
+    const prefix = chunkPromptPrefix(chunkIndex, chunkTotal, "extract");
+    const { text } = await withRetry(
+      () => generateText({ ...genOpts(aiModel, effectivePrompt, `${prefix}Document: ${params.file.name}\n\n${chunk}`), ...outputOpts }),
+      { maxAttempts: 3, baseDelayMs: 200 }
+    );
+
+    const cleaned = text.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+
+    if (params.fields && params.fields.length > 0) {
+      let recs = tryJson(cleaned);
+      if (recs.length === 0) recs = parseCsv(text);
+      if (recs.length === 0) {
+        // Reformat-retry
+        const fieldList = params.fields
+          .map((f) => `- "${f.name}" (${f.type})${f.description ? ": " + f.description : ""}`)
+          .join("\n");
+        const reformatPrompt = `You are a JSON reformatter. Extract the requested fields and return ONLY a JSON array of records.\n\nREQUIRED FIELDS:\n${fieldList}\n\nRULES:\n1. Output MUST start with "[" and end with "]". Nothing else.\n2. No prose, no markdown, no explanations.\n3. Use null for missing values.`;
+        const { text: reformatted } = await withRetry(
+          () => generateText({ ...genOpts(aiModel, reformatPrompt, text), ...outputOpts }),
+          { maxAttempts: 2, baseDelayMs: 200 }
+        );
+        recs = tryJson(reformatted.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim());
+      }
+      return recs;
+    } else {
+      let recs: Record<string, unknown>[] = parseCsv(text);
+      if (recs.length === 0) recs = tryJson(cleaned);
+      if (recs.length === 0) {
+        const strippedLines = cleaned.split(/\r?\n/).filter((l: string) =>
+          l.trim() && !l.startsWith("Here") && !l.startsWith("The ") && !l.startsWith("Below")
+        );
+        const retryRecords = parseCsv(strippedLines.join("\n"));
+        recs = retryRecords.length > 0 ? retryRecords : [{ extracted_text: text }];
+      }
+      return recs;
     }
-    if (records.length === 0) {
-      const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
-      throw new Error(`Model returned unparseable output even after a reformat retry. Try a stronger model. Preview: "${preview}${text.length > 200 ? "…" : ""}"`);
-    }
+  };
+
+  const chunks = chunkText(rawText);
+  let records: Record<string, unknown>[];
+  let failedChunks = 0;
+
+  if (chunks.length === 1) {
+    records = await extractChunk(rawText, 0, 1);
   } else {
-    // CSV-first path (no fields → prompt asked for CSV)
-    records = parseCsv(text);
-    if (records.length === 0) records = tryJson(cleaned);
-    if (records.length === 0) {
-      const strippedLines = cleaned.split(/\r?\n/).filter((l: string) =>
-        l.trim() && !l.startsWith("Here") && !l.startsWith("The ") && !l.startsWith("Below")
-      );
-      const retryRecords = parseCsv(strippedLines.join("\n"));
-      records = retryRecords.length > 0 ? retryRecords : [{ extracted_text: text }];
+    const limit = pLimit(CHUNK_CONCURRENCY);
+    const results = await Promise.allSettled(
+      chunks.map((c) => limit(() => extractChunk(c.text, c.index, c.total)))
+    );
+    records = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === "fulfilled") {
+        records.push(...r.value);
+      } else {
+        failedChunks++;
+        console.error(`documentExtractDirect: chunk ${i + 1}/${chunks.length} failed:`, r.reason);
+      }
     }
+  }
+
+  if (records.length === 0) {
+    throw new Error(failedChunks > 0
+      ? `All ${chunks.length} sections failed during extraction.`
+      : "Model returned unparseable output. Try a stronger model.");
   }
 
   // Merge single-key objects into one record (LLM sometimes returns one field per object)
@@ -775,12 +785,12 @@ RULES:
       fieldNames.every((f) => r[f] === "" || r[f] === null || r[f] === undefined)
     );
     if (allEmpty) {
-      const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
-      throw new Error(`Model returned no usable field values. The document may lack extractable text (scanned PDF?) or the field definitions don't match its content. Preview: "${preview}${text.length > 200 ? "…" : ""}"`);
+      const preview = rawText.slice(0, 200).replace(/\s+/g, " ").trim();
+      throw new Error(`Model returned no usable field values. The document may lack extractable text (scanned PDF?) or the field definitions don't match its content. Preview: "${preview}${rawText.length > 200 ? "…" : ""}"`);
     }
   }
 
-  return { records, fileName: params.file.name, charCount, truncated, count: records.length };
+  return { records, fileName: params.file.name, charCount, truncated, count: records.length, chunks: chunks.length, failedChunks };
 }
 
 // ── documentAnalyzeDirect — mirrors /api/document-analyze ─────────────────────
@@ -838,6 +848,8 @@ export async function documentProcessDirect(params: {
   fileName: string;
   charCount: number;
   truncated: boolean;
+  chunks: number;
+  failedChunks: number;
 }> {
   const { extractTextBrowser } = await import("./document-browser");
   const { text: rawText, truncated, charCount } = await extractTextBrowser(params.file);
@@ -847,13 +859,49 @@ export async function documentProcessDirect(params: {
   }
 
   const aiModel = getModel(params.provider, params.model, params.apiKey, params.baseUrl);
+  const outputOpts: Record<string, unknown> = {};
+  if (params.maxTokens) outputOpts.maxOutputTokens = params.maxTokens;
 
-  const { text } = await withRetry(
-    () => generateText(genOpts(aiModel, params.systemPrompt, `Document: ${params.file.name}\n\n${rawText}`, undefined, params.maxTokens)),
-    { maxAttempts: 3, baseDelayMs: 200 }
-  );
+  const chunks = chunkText(rawText);
 
-  return { text, fileName: params.file.name, charCount, truncated };
+  const processChunk = async (chunk: string, chunkIndex: number, chunkTotal: number): Promise<string> => {
+    const prefix = chunkPromptPrefix(chunkIndex, chunkTotal, "process");
+    const { text } = await withRetry(
+      () => generateText({ ...genOpts(aiModel, params.systemPrompt, `${prefix}Document: ${params.file.name}\n\n${chunk}`), ...outputOpts }),
+      { maxAttempts: 3, baseDelayMs: 200 }
+    );
+    return text;
+  };
+
+  let text: string;
+  let failedChunks = 0;
+
+  if (chunks.length === 1) {
+    text = await processChunk(rawText, 0, 1);
+  } else {
+    const limit = pLimit(CHUNK_CONCURRENCY);
+    const results = await Promise.allSettled(
+      chunks.map((c) => limit(() => processChunk(c.text, c.index, c.total)))
+    );
+    const parts: string[] = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      if (r.status === "fulfilled" && r.value.trim()) {
+        parts.push(r.value);
+      } else if (r.status === "rejected") {
+        failedChunks++;
+        console.error(`documentProcessDirect: chunk ${i + 1}/${chunks.length} failed:`, r.reason);
+        parts.push(`[Section ${i + 1} of ${chunks.length}: processing failed]`);
+      }
+    }
+    text = parts.join("\n\n---\n\n");
+  }
+
+  if (!text.trim()) {
+    throw new Error("Processing produced no output for any section.");
+  }
+
+  return { text, fileName: params.file.name, charCount, truncated, chunks: chunks.length, failedChunks };
 }
 
 // ── agentsRowDirect — mirrors /api/ai-agents-row ─────────────────────────────

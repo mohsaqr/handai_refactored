@@ -4,6 +4,8 @@ import { getModel } from "@/lib/ai/providers";
 import { withRetry } from "@/lib/retry";
 import { DocumentExtractSchema } from "@/lib/validation";
 import { getPrompt, formatExtractionSchemaJson } from "@/lib/prompts";
+import { chunkText, chunkPromptPrefix, CHUNK_CONCURRENCY } from "@/lib/chunk-text";
+import pLimit from "p-limit";
 
 // ── Default prompt when no field schema is provided ───────────────────────────
 
@@ -249,82 +251,103 @@ ABSOLUTE RULES:
 3. Do NOT write a summary of the document — extract the actual field values.
 4. If a field value is not present in the document, use null (not an empty string, not "N/A").
 5. If the document contains NO relevant data at all, return exactly: []
-6. Always wrap records in an array, even when there is only one: [{ ... }]`;
+6. Always wrap records in an array, even when there is only one: [{ ... }]
+7. Extract EVERY matching record — there may be dozens or hundreds. Do NOT stop after a sample or subset.
+8. Completeness is critical. A long document must produce a long output. Never truncate, summarize, or omit records.`;
     } else {
       effectivePrompt = systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
     }
 
     const aiModel = getModel(provider, model, apiKey, baseUrl);
+    const outputOpts: Record<string, unknown> = {};
+    if (maxTokens) outputOpts.maxOutputTokens = maxTokens;
 
-    const { text } = await withRetry(
-      () =>
-        generateText({
-          model: aiModel,
-          system: effectivePrompt,
-          prompt: `Document: ${fileName ?? "untitled"}\n\n${rawText}`,
-          ...(maxTokens ? { maxOutputTokens: maxTokens } : {}),
-        }),
-      { maxAttempts: 3, baseDelayMs: 200 }
-    );
-
-    // Reformat-retry: ask the model to convert its own prose response to JSON.
-    const reformatToJson = async (proseText: string): Promise<string> => {
-      if (!fields || fields.length === 0) return proseText;
-      const fieldList = fields
-        .map((f) => `- "${f.name}" (${f.type})${f.description ? ": " + f.description : ""}`)
-        .join("\n");
-      const reformatPrompt = `You are a JSON reformatter. You will receive text (possibly prose, markdown, or a summary) that describes data. Extract the requested fields from it and return ONLY a JSON array of records.
-
-REQUIRED FIELDS:
-${fieldList}
-
-RULES:
-1. Output MUST start with "[" and end with "]". Nothing else.
-2. No prose, no markdown, no explanations.
-3. Use null for missing values.
-4. If the text describes one subject, return [{ ... }]. If multiple, return one object per subject.`;
-      const { text: reformatted } = await withRetry(
+    const extractChunk = async (chunkBody: string, chunkIndex: number, chunkTotal: number): Promise<Record<string, unknown>[]> => {
+      const prefix = chunkPromptPrefix(chunkIndex, chunkTotal, "extract");
+      const { text } = await withRetry(
         () =>
           generateText({
             model: aiModel,
-            system: reformatPrompt,
-            prompt: proseText,
-            ...(maxTokens ? { maxOutputTokens: maxTokens } : {}),
+            system: effectivePrompt,
+            prompt: `${prefix}Document: ${fileName ?? "untitled"}\n\n${chunkBody}`,
+            ...outputOpts,
           }),
-        { maxAttempts: 2, baseDelayMs: 200 }
+        { maxAttempts: 3, baseDelayMs: 200 }
       );
-      return reformatted;
+
+      const cleaned = text.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+
+      if (fields && fields.length > 0) {
+        // JSON-first path
+        let recs = tryParseJson(cleaned);
+        if (recs.length === 0) recs = parseCsvResponse(text);
+        if (recs.length === 0) {
+          // Reformat-retry: ask model to convert prose → JSON
+          const fieldList = fields
+            .map((f) => `- "${f.name}" (${f.type})${f.description ? ": " + f.description : ""}`)
+            .join("\n");
+          const reformatPrompt = `You are a JSON reformatter. Extract the requested fields and return ONLY a JSON array of records.\n\nREQUIRED FIELDS:\n${fieldList}\n\nRULES:\n1. Output MUST start with "[" and end with "]". Nothing else.\n2. No prose, no markdown, no explanations.\n3. Use null for missing values.`;
+          const { text: reformatted } = await withRetry(
+            () =>
+              generateText({
+                model: aiModel,
+                system: reformatPrompt,
+                prompt: text,
+                ...outputOpts,
+              }),
+            { maxAttempts: 2, baseDelayMs: 200 }
+          );
+          recs = tryParseJson(reformatted.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim());
+        }
+        return recs;
+      } else {
+        // CSV-first path
+        let recs = parseCsvResponse(text);
+        if (recs.length === 0) recs = tryParseJson(cleaned);
+        if (recs.length === 0) {
+          const strippedLines = cleaned.split(/\r?\n/).filter((l) =>
+            l.trim() && !l.startsWith("Here") && !l.startsWith("The ") && !l.startsWith("Below")
+          );
+          const retryRecords = parseCsvResponse(strippedLines.join("\n"));
+          recs = retryRecords.length > 0 ? retryRecords : [{ extracted_text: text }];
+        }
+        return recs;
+      }
     };
 
-    // When fields are defined the prompt asks for JSON, so try JSON first.
-    // When no fields are defined the prompt asks for CSV, so try CSV first.
-    let records: Record<string, unknown>[] = [];
-    let cleaned = text.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
+    const chunks = chunkText(rawText);
+    let records: Record<string, unknown>[];
+    let failedChunks = 0;
+    const warnings: string[] = [];
 
-    if (fields && fields.length > 0) {
-      // JSON-first path (fields defined → prompt asked for JSON)
-      records = tryParseJson(cleaned);
-      if (records.length === 0) records = parseCsvResponse(text);
-      if (records.length === 0) {
-        const reformatted = await reformatToJson(text);
-        cleaned = reformatted.replace(/^```(?:json|csv)?\s*/im, "").replace(/\s*```\s*$/m, "").trim();
-        records = tryParseJson(cleaned);
-      }
-      if (records.length === 0) {
-        const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
-        return NextResponse.json({ error: `Model returned unparseable output even after a reformat retry. Try a stronger model. Preview: "${preview}${text.length > 200 ? "…" : ""}"` }, { status: 422 });
-      }
+    if (chunks.length === 1) {
+      records = await extractChunk(rawText, 0, 1);
     } else {
-      // CSV-first path (no fields → prompt asked for CSV)
-      records = parseCsvResponse(text);
-      if (records.length === 0) records = tryParseJson(cleaned);
-      if (records.length === 0) {
-        const strippedLines = cleaned.split(/\r?\n/).filter((l) =>
-          l.trim() && !l.startsWith("Here") && !l.startsWith("The ") && !l.startsWith("Below")
-        );
-        const retryRecords = parseCsvResponse(strippedLines.join("\n"));
-        records = retryRecords.length > 0 ? retryRecords : [{ extracted_text: text }];
+      const limit = pLimit(CHUNK_CONCURRENCY);
+      const results = await Promise.allSettled(
+        chunks.map((c) => limit(() => extractChunk(c.text, c.index, c.total)))
+      );
+      records = [];
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.status === "fulfilled") {
+          records.push(...r.value);
+        } else {
+          failedChunks++;
+          const reason = r.reason instanceof Error ? r.reason.message : String(r.reason);
+          console.error(`document-extract: chunk ${i + 1}/${chunks.length} failed for "${fileName}": ${reason}`);
+        }
       }
+      if (failedChunks > 0) {
+        warnings.push(`${failedChunks} of ${chunks.length} sections failed — results may be incomplete`);
+      }
+    }
+
+    if (records.length === 0) {
+      return NextResponse.json({ error: failedChunks > 0
+        ? `All ${chunks.length} sections failed during extraction.`
+        : `No records could be extracted. The field definitions may not match the document content.`
+      }, { status: 422 });
     }
 
     // Merge single-key objects into one record (LLM sometimes returns one field per object)
@@ -369,12 +392,16 @@ RULES:
         fieldNames.every((f) => r[f] === "" || r[f] === null || r[f] === undefined)
       );
       if (allEmpty) {
-        const preview = text.slice(0, 200).replace(/\s+/g, " ").trim();
-        return NextResponse.json({ error: `Model returned no usable field values. The document may lack extractable text (scanned PDF?) or the field definitions don't match its content. Preview: "${preview}${text.length > 200 ? "…" : ""}"` }, { status: 422 });
+        const preview = rawText.slice(0, 200).replace(/\s+/g, " ").trim();
+        return NextResponse.json({ error: `Model returned no usable field values. The document may lack extractable text (scanned PDF?) or the field definitions don't match its content. Preview: "${preview}${rawText.length > 200 ? "…" : ""}"` }, { status: 422 });
       }
     }
 
-    return NextResponse.json({ records, fileName: fileName ?? "untitled", charCount, truncated, count: records.length });
+    return NextResponse.json({
+      records, fileName: fileName ?? "untitled", charCount, truncated,
+      count: records.length, chunks: chunks.length, failedChunks,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error("document-extract error:", msg);
