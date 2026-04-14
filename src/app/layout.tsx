@@ -33,6 +33,22 @@ export default function RootLayout({
                 <div className="w-full px-4 sm:px-6 lg:px-8 py-6">
                   {children}
                 </div>
+                <footer className="border-t px-4 sm:px-6 lg:px-8 py-6 mt-auto">
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <div className="text-center sm:text-left">
+                      <span className="font-semibold text-foreground">Handai</span> v1.1 &middot; Created by{" "}
+                      <a href="https://saqr.me" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground transition-colors">
+                        Prof. Mohammed Saqr, PhD
+                      </a>
+                      <br className="sm:hidden" />
+                      <span className="hidden sm:inline"> &middot; </span>
+                      Professor of Computer Science &middot; University of Eastern Finland
+                    </div>
+                    <div className="text-center sm:text-right whitespace-nowrap">
+                      &copy; 2026 All rights reserved &middot; Last updated April 2026
+                    </div>
+                  </div>
+                </footer>
               </main>
             </div>
             <Toaster />
