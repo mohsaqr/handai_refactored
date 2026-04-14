@@ -129,6 +129,10 @@ export default function ConsensusCoderPage() {
   const [workerPrompt, setWorkerPrompt] = useSessionState("consensus_workerPrompt", "");
   const [judgePrompt, setJudgePrompt] = useSessionState("consensus_judgePrompt", "");
   const [kappaStats, setKappaStats] = useSessionState<KappaStats | null>("consensus_kappaStats", null);
+  // Accumulator for running cumulative kappa; reset on each batch when i === 0.
+  // Lives in buildResultEntry which runs BEFORE dispatchSaveResults, so the
+  // cumulative value gets persisted and survives a reload from history.
+  const kappaAccRef = useRef<{ sum: number; count: number }>({ sum: 0, count: 0 });
 
   const [extraWorkers, setExtraWorkers] = useSessionState<WorkerConfig[]>("consensus_extraWorkers", []);
   const [includeJudgeReasoning, setIncludeJudgeReasoning] = useSessionState("consensus_includeJudgeReasoning", true);
@@ -292,6 +296,7 @@ export default function ConsensusCoderPage() {
         userContent = JSON.stringify(subset);
       }
 
+      const t0 = Date.now();
       const result = await dispatchConsensusRow({
         workers: workers.map((w) => ({ provider: w.provider, model: w.model, apiKey: w.apiKey || "", baseUrl: w.baseUrl })),
         judge: { provider: judge.providerId, model: judge.model, apiKey: pJ?.apiKey || "", baseUrl: pJ?.baseUrl },
@@ -305,6 +310,7 @@ export default function ConsensusCoderPage() {
         maxTokens: systemSettings.maxTokens ?? undefined,
         rowIdx: idx,
       });
+      const latencyMs = Date.now() - t0;
 
       const workerCols: Record<string, string> = {};
       result.workerResults?.forEach((wr: { output: string }, i: number) => {
@@ -331,40 +337,57 @@ export default function ConsensusCoderPage() {
         ...baseRow,
         ...workerCols,
         judge_output: result.judgeOutput,
-        ...(includeJudgeReasoning ? { judge_reasoning: result.consensusType === "Unanimous" ? "Same workers' outputs" : (result.judgeReasoning ?? "") } : {}),
+        ...(includeJudgeReasoning ? { judge_reasoning: result.judgeReasoning ?? (result.consensusType === "Unanimous" ? "Same workers' outputs" : "") } : {}),
         consensus: result.consensusType,
         _row_kappa: result.kappa,
         kappa: "—",
         ...qualityCols,
         ...(enableDisagreementAnalysis ? { disagreement_reason: result.consensusType === "Unanimous" ? "No disagreement" : (result.disagreementReason ?? "") } : {}),
         status: "success",
+        latency_ms: latencyMs,
       };
     },
-    buildResultEntry: (r: Row, i: number) => ({
-      rowIndex: i,
-      input: r as Record<string, unknown>,
-      output: (r.judge_output ?? "") as string,
-      status: (r.consensus === "Error" ? "error" : "success") as string,
-      errorMessage: r.error_msg as string | undefined,
-    }),
+    buildResultEntry: (r: Row, i: number) => {
+      // Reset accumulator at the start of each batch (mergedResults.map calls
+      // this in order with ascending i).
+      if (i === 0) kappaAccRef.current = { sum: 0, count: 0 };
+      if (r.status !== "error" && r.status !== "skipped") {
+        const rk = r._row_kappa as number | null | undefined;
+        if (rk !== null && rk !== undefined && !isNaN(rk)) {
+          kappaAccRef.current.sum += rk;
+          kappaAccRef.current.count++;
+        }
+      }
+      // Mutate r so both the saved entry (via `input: r`) and the in-memory
+      // display row carry the cumulative value.
+      r.kappa = kappaAccRef.current.count > 0
+        ? (kappaAccRef.current.sum / kappaAccRef.current.count).toFixed(3)
+        : "—";
+      return {
+        rowIndex: i,
+        input: r as Record<string, unknown>,
+        // Output intentionally blank — judge_output already lives in `input`, so
+        // repeating it here would create a duplicate "output" column in history.
+        output: "",
+        status: (r.consensus === "Error" ? "error" : "success") as string,
+        latency: r.latency_ms as number | undefined,
+        errorMessage: r.error_msg as string | undefined,
+      };
+    },
     onComplete: (results: Row[]) => {
-      // Compute running cumulative kappa and write into each row
+      // Row-level `kappa` is already written in buildResultEntry. Here we only
+      // compute the final cumulative value for the summary card.
       let sum = 0;
       let count = 0;
       for (const row of results) {
-        if (row.status === "error" || row.status === "skipped") {
-          row.kappa = "—";
-          continue;
-        }
+        if (row.status === "error" || row.status === "skipped") continue;
         const rk = row._row_kappa as number | null;
         if (rk !== null && rk !== undefined && !isNaN(rk)) {
           sum += rk;
           count++;
         }
-        row.kappa = count > 0 ? (sum / count).toFixed(3) : "—";
       }
 
-      // Set final cumulative kappa in summary card
       if (count > 0) {
         const finalKappa = sum / count;
         let label = "Very Low";
@@ -408,6 +431,45 @@ export default function ConsensusCoderPage() {
       const avgLatency = latencies.length > 0
         ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
         : 0;
+
+      // Recompute cumulative Cohen's kappa from restored per-row kappas.
+      // buildResultEntry spread the whole row into inputJson, so _row_kappa
+      // survives the round-trip through the DB.
+      let kappaSum = 0;
+      let kappaCount = 0;
+      for (const r of restored.results) {
+        if (r.status === "error" || r.status === "skipped") {
+          r.kappa = "—";
+          continue;
+        }
+        const rk = r._row_kappa as number | null | undefined;
+        if (rk !== null && rk !== undefined && !isNaN(rk)) {
+          kappaSum += rk;
+          kappaCount++;
+        }
+        r.kappa = kappaCount > 0 ? (kappaSum / kappaCount).toFixed(3) : "—";
+      }
+      if (kappaCount > 0) {
+        const finalKappa = kappaSum / kappaCount;
+        let label = "Very Low";
+        if (finalKappa >= 0.8) label = "Very High";
+        else if (finalKappa >= 0.6) label = "High";
+        else if (finalKappa >= 0.4) label = "Moderate";
+        else if (finalKappa >= 0.2) label = "Low";
+        setKappaStats({ kappa: finalKappa, kappaLabel: label });
+      } else {
+        setKappaStats(null);
+      }
+
+      // Restore upload-data file list as a placeholder entry (mirrors
+      // process-documents: the original File contents aren't serialized, so
+      // we show the filename with a "re-upload to re-run" hint).
+      if (restored.dataName && restored.dataName !== "single-run") {
+        filesRef.current.clear();
+        const placeholder = new File([], restored.dataName);
+        filesRef.current.set(fileKey(placeholder), placeholder);
+        setFileStates([{ file: placeholder, status: "done" }]);
+      }
 
       const errors = restored.results.filter((r) => r.status === "error").length;
       useProcessingStore.getState().completeJob(

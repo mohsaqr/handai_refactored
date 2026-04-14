@@ -75,6 +75,12 @@ export default function RunDetailClient({ id }: { id: string }) {
             return [{ ...input, output: r.output ?? "", ...meta }];
         }
 
+        // consensus-coder stores judge_output + worker_* columns inside input;
+        // r.output is intentionally blank, so skip the duplicate "output" column.
+        if (runType === "consensus-coder") {
+            return [{ ...input, ...meta }];
+        }
+
         // If output is a JSON object (e.g. automator), spread its fields instead of adding an "output" column
         if (!hasAiOutput && r.output) {
             if (typeof r.output === "string") {

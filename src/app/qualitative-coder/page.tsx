@@ -450,9 +450,9 @@ export default function QualitativeCoderPage() {
     if (codebook.length === 0) { toast.error("Codebook is empty"); return; }
     const named = codebook.filter((e) => e.code.trim());
     const rows = named.length > 0
-      ? named.map((e) => ({ "code label": e.code, description: e.description, examples: e.example }))
-      : [{ "code label": "", description: "", examples: "" }];
-    const ws = XLSX.utils.json_to_sheet(rows, { header: ["code label", "description", "examples"] });
+      ? named.map((e) => ({ "Code label": e.code, Description: e.description, Examples: e.example }))
+      : [{ "Code label": "", Description: "", Examples: "" }];
+    const ws = XLSX.utils.json_to_sheet(rows, { header: ["Code label", "Description", "Examples"] });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Codebook");
     XLSX.writeFile(wb, "codebook.xlsx");
@@ -595,9 +595,9 @@ export default function QualitativeCoderPage() {
               <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Codebook</div>
               <div className="px-3 pt-2 flex gap-2 items-center text-xs font-medium text-muted-foreground">
                 <div className="shrink-0 w-6" />
-                <div className="flex-[2]">code label</div>
-                <div className="flex-[3]">description</div>
-                <div className="flex-[3]">examples</div>
+                <div className="flex-[2]">Code label</div>
+                <div className="flex-[3]">Description</div>
+                <div className="flex-[3]">Examples</div>
                 <div className="w-8 shrink-0" />
               </div>
               <div className="p-3 space-y-2">
@@ -642,9 +642,9 @@ export default function QualitativeCoderPage() {
               <div className="px-4 py-2.5 border-b bg-muted/20 text-sm font-medium">Codebook</div>
               <div className="px-3 pt-2 flex gap-2 items-center text-xs font-medium text-muted-foreground">
                 <div className="shrink-0 w-6" />
-                <div className="flex-[2]">code label</div>
-                <div className="flex-[3]">description</div>
-                <div className="flex-[3]">examples</div>
+                <div className="flex-[2]">Code label</div>
+                <div className="flex-[3]">Description</div>
+                <div className="flex-[3]">Examples</div>
                 <div className="w-8 shrink-0" />
               </div>
               <div className="p-3 space-y-2">

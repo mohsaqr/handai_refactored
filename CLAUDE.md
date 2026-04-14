@@ -105,7 +105,7 @@ Schema at `prisma/schema.prisma`. Key models:
 
 Each tool is a page at `src/app/<tool-name>/page.tsx`. Pages are `"use client"` components that use the Zustand store for provider config and `p-limit` for concurrency control (governed by `systemSettings.maxConcurrency`).
 
-14 tool pages: `abstract-screener`, `ai-agents`, `ai-coder`, `automator`, `codebook-generator`, `consensus-coder`, `extract-data`, `generate`, `model-comparison`, `process-documents`, `qualitative-coder`, `transform` + `settings` and `history` (with `history/[id]` dynamic route).
+12 tool pages: `abstract-screener`, `ai-agents`, `ai-coder`, `automator`, `codebook-generator`, `consensus-coder`, `extract-data`, `generate`, `model-comparison`, `process-documents`, `qualitative-coder`, `transform` — plus `settings` and `history` (with `history/[id]` dynamic route).
 
 ### Shared Hooks (`src/hooks/`)
 

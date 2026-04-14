@@ -196,7 +196,7 @@ RULES:
 - Deduct points for: factual errors, missing key information, off-topic content, unnecessary additions.
 - Be consistent: similar quality responses should get similar scores.
 
-Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is 1-10. No other text.`,
+Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is a decimal number between 1.0 and 10.0 (one decimal place, e.g. 6.5, 7.3, 9.0). No other text.`,
               prompt: `Original Data: ${userContent}\n\nWorker Responses:\n${workersFormatted}\n\nJudge's Chosen Answer:\n${judgeOutput}\n\nConsensus Level: ${consensusType}`,
               ...llmOpts,
             }),
@@ -205,7 +205,27 @@ Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is 1-10. No other t
         const clean = qsText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
         const parsed = JSON.parse(clean) as { quality_scores: number[] };
         if (Array.isArray(parsed.quality_scores)) {
-          qualityScores = parsed.quality_scores;
+          // Normalize: workers with identical outputs must receive identical scores.
+          // Group by normalized output text, average the judge's scores within each
+          // group, and assign the group average to every member. This removes the
+          // small judge-side variance that can drift otherwise-identical responses
+          // by a point or two.
+          const normalize = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+          const groups = new Map<string, number[]>();
+          outputs.forEach((out, i) => {
+            const key = normalize(out);
+            const score = parsed.quality_scores[i];
+            if (typeof score !== "number") return;
+            const bucket = groups.get(key);
+            if (bucket) bucket.push(score);
+            else groups.set(key, [score]);
+          });
+          qualityScores = outputs.map((out, i) => {
+            const bucket = groups.get(normalize(out));
+            if (!bucket || bucket.length === 0) return parsed.quality_scores[i];
+            const avg = bucket.reduce((a, b) => a + b, 0) / bucket.length;
+            return Math.round(avg * 10) / 10;
+          });
         }
       } catch {
         // non-fatal — skip quality scores on parse failure
@@ -213,7 +233,7 @@ Return ONLY valid JSON: {"quality_scores":[N,N,...]} where N is 1-10. No other t
     }
 
     // Step 5 (optional): Judge reasoning — separate call for reliability
-    if (includeReasoning && consensusType !== "Unanimous") {
+    if (includeReasoning && !allSame) {
       try {
         const { text: jrText } = await withRetry(
           () =>

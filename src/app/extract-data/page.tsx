@@ -48,6 +48,7 @@ import { getPrompt, formatExtractionSchema } from "@/lib/prompts";
 import { FileUploader } from "@/components/tools/FileUploader";
 import { Textarea } from "@/components/ui/textarea";
 import * as XLSX from "xlsx";
+import pLimit from "p-limit";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -258,28 +259,45 @@ export default function ExtractDataPage() {
 
     setAnalyzing(true);
     try {
-      const sampleFile = fileStates[0].file;
-      const result = await dispatchDocumentAnalyze({
-        file: sampleFile,
-        provider: activeModel.providerId,
-        model: activeModel.defaultModel,
-        apiKey: activeModel.apiKey || "",
-        baseUrl: activeModel.baseUrl,
-        hint: customPrompt.trim() || undefined,
-      });
+      const limit = pLimit(systemSettings.maxConcurrency || 5);
+      const settled = await Promise.allSettled(
+        fileStates.map((fs) => limit(() =>
+          dispatchDocumentAnalyze({
+            file: fs.file,
+            provider: activeModel.providerId,
+            model: activeModel.defaultModel,
+            apiKey: activeModel.apiKey || "",
+            baseUrl: activeModel.baseUrl,
+            hint: customPrompt.trim() || undefined,
+          })
+        ))
+      );
 
-      if (result.fields?.length > 0) {
-        const validTypes = new Set(FIELD_TYPES);
-        const mapped: FieldDef[] = result.fields.map((f: FieldDef) => ({
-          name: f.name || "",
-          type: validTypes.has(f.type) ? f.type : "text",
-          description: f.description || "",
-        }));
-        setFields(mapped);
+      // Merge fields across files, dedupe by lowercased name, keep first type/description
+      const validTypes = new Set(FIELD_TYPES);
+      const merged = new Map<string, FieldDef>();
+      let failed = 0;
+      for (const r of settled) {
+        if (r.status !== "fulfilled") { failed++; continue; }
+        const fields = (r.value.fields as FieldDef[] | undefined) ?? [];
+        for (const f of fields) {
+          const key = (f.name || "").trim().toLowerCase();
+          if (!key || merged.has(key)) continue;
+          merged.set(key, {
+            name: f.name,
+            type: validTypes.has(f.type) ? f.type : "text",
+            description: f.description || "",
+          });
+        }
+      }
+
+      if (merged.size > 0) {
+        setFields(Array.from(merged.values()));
         setHasSuggestedOnce(true);
-        toast.success(`${mapped.length} fields suggested`);
+        const analyzed = fileStates.length - failed;
+        toast.success(`${merged.size} fields suggested from ${analyzed} file${analyzed !== 1 ? "s" : ""}${failed > 0 ? ` (${failed} failed)` : ""}`);
       } else {
-        toast.info("No suggestions returned. Try with a more structured document.");
+        toast.info("No suggestions returned. Try with more structured documents.");
       }
     } catch (err: unknown) {
       toast.error("Analysis failed", { description: err instanceof Error ? err.message : String(err) });

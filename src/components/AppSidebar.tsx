@@ -112,16 +112,16 @@ const data = {
                     url: "/ai-agents",
                     icon: Users,
                 },
-                {
-                    title: "Abstract Screener",
-                    url: "/abstract-screener",
-                    icon: FlaskConical,
-                },
             ],
         },
         {
             title: "Data Coding",
             items: [
+                {
+                    title: "Codebook Generator",
+                    url: "/codebook-generator",
+                    icon: BookOpen,
+                },
                 {
                     title: "Qualitative Coder",
                     url: "/qualitative-coder",
@@ -133,9 +133,9 @@ const data = {
                     icon: Bot,
                 },
                 {
-                    title: "Codebook Generator",
-                    url: "/codebook-generator",
-                    icon: BookOpen,
+                    title: "Abstract Screener",
+                    url: "/abstract-screener",
+                    icon: FlaskConical,
                 },
             ],
         },

@@ -67,9 +67,15 @@ export function SmartFileUpload({ file, status, errorMessage, previewRows, onDro
           <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg border bg-muted/20">
             <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
             <span className="flex-1 truncate text-xs">{file.name}</span>
-            <span className="text-[10px] text-muted-foreground shrink-0">
-              {(file.size / 1024).toFixed(0)} KB
-            </span>
+            {file.size === 0 ? (
+              <span className="text-[10px] text-red-600 dark:text-red-400 shrink-0 italic" title="Restored placeholder — original file contents are not stored. Re-upload the file to re-run.">
+                Placeholder · re-upload to re-run
+              </span>
+            ) : (
+              <span className="text-[10px] text-muted-foreground shrink-0">
+                {(file.size / 1024).toFixed(0)} KB
+              </span>
+            )}
 
             {status === "pending" && (
               <span className="text-[10px] text-muted-foreground shrink-0">Pending</span>

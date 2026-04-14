@@ -186,6 +186,15 @@ export default function CodebookGeneratorPage() {
     if (data.length === 0) return toast.error("No data loaded");
     if (!providerConfig) return toast.error("No enabled provider configured. Check Settings.");
 
+    // Clear any previous run's codebook + review state before starting over.
+    setCodebookStructured([]);
+    setDiscoveryThemes([]);
+    setDiscoveryRaw("");
+    setConsolidatedThemes([]);
+    setAwaitingReview(false);
+    setAwaitingReview2(false);
+    setLastRunId(null);
+
     const sampleRows = data.slice(0, 100);
 
     // Filter to selected columns only
@@ -335,9 +344,9 @@ export default function CodebookGeneratorPage() {
   };
 
   const codebookRows: Row[] = codebookStructured.map((e) => ({
-    Code: e.code,
+    "Code label": e.code,
     Description: e.description,
-    Example: e.example,
+    Examples: e.example,
   }));
 
   const isProcessing = stage !== "idle" && stage !== "done";
@@ -357,6 +366,7 @@ export default function CodebookGeneratorPage() {
           </Button>
       </div>
 
+      <div className={(isProcessing || awaitingReview || awaitingReview2) ? "pointer-events-none opacity-60" : ""}>
       {/* ── 1. Upload Data ────────────────────────────────────────────────── */}
       <div className="space-y-4 pb-8">
         <h2 className="text-2xl font-bold">1. Upload Data</h2>
@@ -387,17 +397,9 @@ export default function CodebookGeneratorPage() {
 
       <div className="border-t" />
 
-      {/* ── 2. Describe Codebook ──────────────────────────────────────────── */}
+      {/* ── 2. Define Columns ─────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
-        <h2 className="text-2xl font-bold">2. Describe Codebook</h2>
-        <PromptEditor
-          value={codebookDescription}
-          onChange={setCodebookDescription}
-          placeholder="Example: Generate a codebook for thematic analysis of interview transcripts about workplace satisfaction..."
-          examplePrompts={SAMPLE_CODEBOOK_DESCRIPTIONS}
-          label="Instructions"
-        />
-
+        <h2 className="text-2xl font-bold">2. Define Columns</h2>
         <ColumnSelector
           allColumns={allColumns}
           selectedCols={selectedCols}
@@ -409,25 +411,38 @@ export default function CodebookGeneratorPage() {
 
       <div className="border-t" />
 
-      {/* ── 3. AI Instructions ────────────────────────────────────────────── */}
-      <AIInstructionsSection sectionNumber={3} value={aiInstructions} onChange={setAiInstructions} />
+      {/* ── 3. Describe Codebook ──────────────────────────────────────────── */}
+      <div className="space-y-4 py-8">
+        <h2 className="text-2xl font-bold">3. Describe Codebook</h2>
+        <PromptEditor
+          value={codebookDescription}
+          onChange={setCodebookDescription}
+          placeholder="Example: Generate a codebook for thematic analysis of interview transcripts about workplace satisfaction..."
+          examplePrompts={SAMPLE_CODEBOOK_DESCRIPTIONS}
+          label="Instructions"
+        />
+      </div>
 
       <div className="border-t" />
 
-      {/* ── 4. Execute ────────────────────────────────────────────────────── */}
+      {/* ── 4. AI Instructions ────────────────────────────────────────────── */}
+      <AIInstructionsSection sectionNumber={4} value={aiInstructions} onChange={setAiInstructions} />
+      </div>
+
+      <div className="border-t" />
+
+      {/* ── 5. Execute ────────────────────────────────────────────────────── */}
       <div className="space-y-4 py-8">
-        <h2 className="text-2xl font-bold">4. Execute</h2>
+        <h2 className="text-2xl font-bold">5. Execute</h2>
 
         <NoModelWarning activeModel={providerConfig} />
 
-        {!awaitingReview && !awaitingReview2 && (
-          <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white w-full"
-            disabled={data.length === 0 || isProcessing || !providerConfig}
-            onClick={() => generatePhaseA()}>
-            {isProcessing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
-            Full Run ({Math.min(data.length, 100)} rows)
-          </Button>
-        )}
+        <Button size="lg" className="h-12 text-base bg-red-500 hover:bg-red-600 text-white w-full"
+          disabled={data.length === 0 || isProcessing || awaitingReview || awaitingReview2 || !providerConfig}
+          onClick={() => generatePhaseA()}>
+          {(isProcessing || awaitingReview || awaitingReview2) ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+          Full Run ({Math.min(data.length, 100)} rows)
+        </Button>
 
         {/* Stage progress tracker */}
         {(stage !== "idle" || awaitingReview || awaitingReview2) && (
@@ -479,7 +494,7 @@ export default function CodebookGeneratorPage() {
           ) : (
             <div className="space-y-2">
               {discoveryThemes.map((t, idx) => (
-                <div key={idx} className="flex items-center gap-2 p-3 border rounded-lg bg-muted/5">
+                <div key={idx} className="flex items-center gap-2">
                   <Input
                     value={t.theme}
                     onChange={(e) =>
@@ -547,7 +562,7 @@ export default function CodebookGeneratorPage() {
 
           <div className="space-y-2">
             {consolidatedThemes.map((t, idx) => (
-              <div key={idx} className="flex items-center gap-2 p-3 border rounded-lg bg-muted/5">
+              <div key={idx} className="flex items-center gap-2">
                   <Input
                     value={t.code}
                     onChange={(e) =>
