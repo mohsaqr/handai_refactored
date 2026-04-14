@@ -33,6 +33,8 @@ export interface ProcessingJob {
   startedAt: number;
   /** Generation counter — prevents stale loops from updating a superseded run */
   generation: number;
+  /** Original row count for the run (e.g. 10 for test mode) — used by resume to stay in scope */
+  originalRowCount: number | null;
 }
 
 // ── Abort flags (outside Zustand — non-serializable) ─────────────────────────
@@ -63,7 +65,7 @@ interface ProcessingState {
 
   /** Start a new batch job — aborts any existing run for this tool.
    *  When resuming, pass initialCompleted to continue from where we left off. */
-  startJob: (toolId: string, mode: RunMode, total: number, initialCompleted?: number) => number;
+  startJob: (toolId: string, mode: RunMode, total: number, initialCompleted?: number, originalRowCount?: number) => number;
 
   /** Increment completed count by 1 */
   incrementProgress: (toolId: string) => void;
@@ -89,11 +91,14 @@ interface ProcessingState {
 export const useProcessingStore = create<ProcessingState>((set) => ({
   jobs: {},
 
-  startJob: (toolId, mode, total, initialCompleted) => {
+  startJob: (toolId, mode, total, initialCompleted, originalRowCount) => {
     // Abort any existing run
     abortFlags.set(toolId, false);
     const gen = (generations.get(toolId) ?? 0) + 1;
     generations.set(toolId, gen);
+
+    // Preserve originalRowCount from a previous job when resuming (not passed)
+    const prevOriginal = useProcessingStore.getState().jobs[toolId]?.originalRowCount ?? null;
 
     set((state) => ({
       jobs: {
@@ -108,6 +113,7 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
           runId: null,
           startedAt: Date.now(),
           generation: gen,
+          originalRowCount: originalRowCount ?? prevOriginal,
         },
       },
     }));
@@ -146,14 +152,16 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
   completeJob: (toolId, results, stats, runId) => {
     set((state) => {
       const existing = state.jobs[toolId];
+      const total = existing?.progress?.total ?? 0;
       return {
         jobs: {
           ...state.jobs,
           [toolId]: {
             runMode: existing?.runMode ?? ("full" as RunMode),
-            progress: existing?.progress ?? { completed: 0, total: 0 },
+            progress: { completed: total, total },
             startedAt: existing?.startedAt ?? 0,
             generation: existing?.generation ?? 0,
+            originalRowCount: existing?.originalRowCount ?? null,
             isProcessing: false,
             aborting: false,
             results,
@@ -214,6 +222,7 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
             runId: null,
             startedAt: Date.now(),
             generation: 0,
+            originalRowCount: null,
           },
         },
       };

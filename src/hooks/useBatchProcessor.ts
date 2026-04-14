@@ -106,7 +106,7 @@ async function executeProcessing(params: ProcessRowsParams) {
 
   const store = useProcessingStore.getState();
   const progressTotal = fullTotal ?? indicesToProcess.length;
-  const gen = store.startJob(toolId, mode, progressTotal, initialCompleted);
+  const gen = store.startJob(toolId, mode, progressTotal, initialCompleted, fullTotal == null ? targetData.length : undefined);
 
   const localRunId = await dispatchCreateRun({
     runType,
@@ -349,26 +349,32 @@ export function useBatchProcessor(
       if (data.length === 0) { toast.error("No data loaded"); return; }
       if (!activeModel) { toast.error("No model configured. Go to Settings."); return; }
 
-      const existingResults = useProcessingStore.getState().jobs[toolId]?.results ?? [];
+      const job = useProcessingStore.getState().jobs[toolId];
+      const existingResults = job?.results ?? [];
+      const originalMode = job?.runMode ?? "full";
+      // Scope resume to the original row count (e.g. 10 for test mode)
+      const scopeCount = job?.originalRowCount ?? data.length;
+      const scopedData = data.slice(0, scopeCount);
+
       const retryIndices: number[] = [];
-      for (let i = 0; i < data.length; i++) {
+      for (let i = 0; i < scopedData.length; i++) {
         const existing = existingResults[i];
         if (!existing || existing.status === "error" || existing.status === "skipped") retryIndices.push(i);
       }
       if (retryIndices.length === 0) { toast.info("No incomplete rows to retry"); return; }
 
-      const baseResults: Row[] = data.map((row, i) =>
+      const baseResults: Row[] = scopedData.map((row, i) =>
         existingResults[i] && existingResults[i].status !== "error" && existingResults[i].status !== "skipped" ? existingResults[i] : row
       );
 
-      const alreadyCompleted = data.length - retryIndices.length;
+      const alreadyCompleted = scopedData.length - retryIndices.length;
       const outcome = await launchProcessing({
-        toolId, mode: "full", targetData: data, indicesToProcess: retryIndices,
+        toolId, mode: originalMode, targetData: scopedData, indicesToProcess: retryIndices,
         baseResults,
         runType, activeModel, systemSettings, dataName, systemPrompt,
         processRow, buildResultEntry, runParams,
         concurrency: concurrency ?? systemSettings.maxConcurrency,
-        fullTotal: data.length,
+        fullTotal: scopedData.length,
         initialCompleted: alreadyCompleted,
       });
 

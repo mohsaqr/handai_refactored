@@ -88,7 +88,8 @@ All in `src/app/api/`. Each route validates input with Zod schemas from `src/lib
 - `comparison-row` — Parallel multi-model dispatch for Model Comparison
 - `automator-row` — Multi-step pipeline execution
 - `generate-row` — Synthetic data generation
-- `document-extract` / `document-analyze` — PDF/DOCX processing (web uses Node.js `pdf-parse` + `mammoth`; static uses `pdfjs-dist` WASM + mammoth browser build via `src/lib/document-browser.ts`)
+- `ai-agents-row` — Multi-agent negotiation with role-based personas, multi-round refinement, and referee synthesis
+- `document-extract` / `document-analyze` / `document-process` — PDF/DOCX processing (web uses Node.js `pdf-parse` + `mammoth`; static uses `pdfjs-dist` WASM + mammoth browser build via `src/lib/document-browser.ts`)
 - `local-models` — Probes Ollama (port 11434) + LM Studio (port 1234)
 - `runs` / `runs/[id]` / `results` — CRUD for run history
 
@@ -104,7 +105,7 @@ Schema at `prisma/schema.prisma`. Key models:
 
 Each tool is a page at `src/app/<tool-name>/page.tsx`. Pages are `"use client"` components that use the Zustand store for provider config and `p-limit` for concurrency control (governed by `systemSettings.maxConcurrency`).
 
-13 tool pages: `abstract-screener`, `ai-coder`, `automator`, `codebook-generator`, `consensus-coder`, `generate`, `manual-coder`, `model-comparison`, `process-documents`, `qualitative-coder`, `transform` + `settings` and `history` (with `history/[id]` dynamic route).
+14 tool pages: `abstract-screener`, `ai-agents`, `ai-coder`, `automator`, `codebook-generator`, `consensus-coder`, `extract-data`, `generate`, `model-comparison`, `process-documents`, `qualitative-coder`, `transform` + `settings` and `history` (with `history/[id]` dynamic route).
 
 ### Shared Hooks (`src/hooks/`)
 
@@ -159,6 +160,8 @@ Key state in page.tsx:
 - `settings: AICSettings` — 6 UI settings (contextRows, autoAdvance, lightMode, horizontalCodes, buttonsAboveText, autoAcceptThreshold)
 
 localStorage keys: `aic_autosave` (session recovery), `aic_settings` (UI settings), `aic_named_sessions` (saved sessions), `handai_codebook_aicoder` (codebook persistence).
+
+Abstract Screener also uses autosave (`as_autosave` key) with the same recovery banner pattern on page load.
 
 6 sample datasets are available in `src/lib/sample-data.ts` (product reviews, healthcare interviews, support tickets, learning experiences, exit interviews, stakeholder feedback) — all tools can use these for testing without requiring file uploads.
 

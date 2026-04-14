@@ -27,6 +27,27 @@ export async function GET(
     }
 }
 
+export async function PATCH(
+    req: NextRequest,
+    { params }: { params: Promise<{ id: string }> }
+) {
+    try {
+        const { id } = await params;
+        const body = await req.json();
+        const { inputFile } = body;
+        if (typeof inputFile !== "string" || !inputFile.trim()) {
+            return NextResponse.json({ error: "inputFile is required" }, { status: 400 });
+        }
+        const run = await prisma.run.update({
+            where: { id },
+            data: { inputFile: inputFile.trim() },
+        });
+        return NextResponse.json({ run });
+    } catch (error: unknown) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    }
+}
+
 export async function DELETE(
     _req: NextRequest,
     { params }: { params: Promise<{ id: string }> }
